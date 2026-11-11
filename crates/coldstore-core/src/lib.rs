@@ -18,6 +18,10 @@
 //! - every archive index entry stores the SHA-256 of the original file
 //!   content, mandatory since format v0.1.
 
+pub mod magic;
+pub mod predict;
+pub mod scan;
+
 /// Crate version as declared in `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

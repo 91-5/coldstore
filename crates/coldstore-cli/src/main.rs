@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use coldstore_core::dedupe;
 use coldstore_core::predict::{self, format_bytes, PredictionReport, Verdict};
 use coldstore_core::scan::{self, ScanResult};
 
@@ -45,6 +46,22 @@ enum Cmd {
         #[arg(long, default_value_t = 256)]
         min_candidate_kb: u64,
         /// 输出完整 JSON（逐字节可复现）
+        #[arg(long)]
+        json: bool,
+    },
+    /// 去重识别：大小分桶 + SHA-256，只出计划、绝不执行（执行属 002 执行层）
+    Dedupe {
+        path: PathBuf,
+        /// 兼容卡片 CLI 形态；001 的 dedupe 本就永远 plan-only
+        #[arg(long)]
+        plan_only: bool,
+        /// 入桶最小体积（KB，默认 4）
+        #[arg(long, default_value_t = 4)]
+        min_size_kb: u64,
+        /// 保留策略：oldest（默认）/ newest / 指定保留路径
+        #[arg(long)]
+        keep: Option<String>,
+        /// 输出完整 JSON
         #[arg(long)]
         json: bool,
     },
@@ -97,6 +114,79 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Dedupe {
+            path,
+            plan_only,
+            min_size_kb,
+            keep,
+            json,
+        } => {
+            let _ = plan_only; // 001 的 dedupe 只出计划，永远 plan-only
+            let scan_res = scan::scan(&path, &Default::default())?;
+            let policy = match keep.as_deref() {
+                None | Some("oldest") => dedupe::KeepPolicy::Oldest,
+                Some("newest") => dedupe::KeepPolicy::Newest,
+                Some(p) => dedupe::KeepPolicy::KeepPath(PathBuf::from(p)),
+            };
+            let opts = dedupe::DedupeOptions {
+                min_size: min_size_kb * 1024,
+                policy,
+            };
+            let plan = dedupe::dedupe(&scan_res, &opts)?;
+            if json {
+                println!("{}", serde_json::to_string(&plan)?);
+            } else {
+                print_dedupe(&plan);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_dedupe(plan: &dedupe::DedupePlan) {
+    println!(
+        "去重计划（仅识别，不执行 —— 硬链接替换属 002 执行层）: 策略 {}，阈值 ≥ {}",
+        plan.policy,
+        format_bytes(plan.min_size)
+    );
+    println!(
+        "  扫描 {} 个文件，入桶 {}，哈希成功 {}（失败 {}），重复组 {} 个",
+        plan.scanned_files,
+        plan.bucketed_files,
+        plan.hashed_files,
+        plan.hash_failures,
+        plan.groups.len()
+    );
+    println!(
+        "  预计可回收: {}   （已完全硬链接的组: {} 个——AV-N1，节省 0MB）",
+        format_bytes(plan.total_reclaimable_bytes),
+        plan.fully_hardlinked_groups
+    );
+    for (n, g) in plan.groups.iter().enumerate() {
+        println!(
+            "  [组 {}] sha256={}… 体积 {}  保留: {}（mtime {}）",
+            n + 1,
+            &g.sha256_hex[..16.min(g.sha256_hex.len())],
+            format_bytes(g.size),
+            g.keep.path.display(),
+            fmt_time(g.keep.modified)
+        );
+        for d in &g.duplicates {
+            let mark = if d.same_data_as_keep {
+                "已硬链接（同一份数据，节省 0MB）"
+            } else {
+                "独立副本（可回收）"
+            };
+            println!("      副本: {} — {}", d.path.display(), mark);
+        }
+    }
+}
+
+/// Human-readable mtime for plan output (epoch seconds; "未知" when absent).
+fn fmt_time(t: Option<std::time::SystemTime>) -> String {
+    match t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) {
+        Some(d) => format!("{} s", d.as_secs()),
+        None => "未知".to_string(),
     }
 }
 

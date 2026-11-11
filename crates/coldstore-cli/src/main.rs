@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use coldstore_core::dedupe;
 use coldstore_core::predict::{self, format_bytes, PredictionReport, Verdict};
 use coldstore_core::scan::{self, ScanResult};
+use coldstore_core::{archive, dedupe};
 
 #[derive(Parser)]
 #[command(
@@ -61,6 +61,52 @@ enum Cmd {
         /// 保留策略：oldest（默认）/ newest / 指定保留路径
         #[arg(long)]
         keep: Option<String>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 归档：写入 .coldstore 容器（独立 zstd 帧 + 内嵌索引；不动源文件）
+    Archive {
+        path: PathBuf,
+        /// 容器输出路径
+        #[arg(short, long = "output")]
+        output: PathBuf,
+        /// 只归档这些扩展名（逗号分隔，如 rlib,pdb）
+        #[arg(long = "include-ext", value_delimiter = ',')]
+        include_ext: Vec<String>,
+        /// 最小体积（KB，0=不限）
+        #[arg(long, default_value_t = 0)]
+        min_size_kb: u64,
+        /// 同时写派生 sidecar .idx 缓存（内嵌索引仍为唯一事实源）
+        #[arg(long)]
+        sidecar: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 单文件取回：只解压目标帧，SHA-256 校验后落盘
+    Extract {
+        container: PathBuf,
+        /// 序号（数字）或路径（大小写不敏感）
+        #[arg(long)]
+        key: String,
+        /// 显式目标路径（任意卷均可）
+        #[arg(short = 'd', long = "dest")]
+        dest: Option<PathBuf>,
+        /// 还原到记录的原路径（跨卷将被拒绝——AV-5）
+        #[arg(long)]
+        to_original: bool,
+    },
+    /// 列出容器内容（索引 fail-closed）
+    List {
+        container: PathBuf,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 全量校验：逐帧解码 + SHA-256 比对
+    Verify {
+        container: PathBuf,
         /// 输出完整 JSON
         #[arg(long)]
         json: bool,
@@ -140,6 +186,196 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Archive {
+            path,
+            output,
+            include_ext,
+            min_size_kb,
+            sidecar,
+            json,
+        } => {
+            let scan_res = scan::scan(&path, &Default::default())?;
+            let include: Vec<String> = include_ext
+                .iter()
+                .map(|s| s.trim().to_lowercase())
+                .collect();
+            let out_lower = output.to_string_lossy().to_lowercase();
+            let tmp_lower = format!("{out_lower}.tmp");
+            let excluded_self = scan_res
+                .files
+                .iter()
+                .filter(|f| {
+                    let p = f.path.to_string_lossy().to_lowercase();
+                    p == out_lower || p == tmp_lower || p.starts_with(&format!("{out_lower}."))
+                })
+                .count();
+            if excluded_self > 0 {
+                eprintln!("⚠ 已排除 {excluded_self} 个与容器自身重名的文件");
+            }
+            let picked: Vec<&coldstore_core::scan::FileEntry> = scan_res
+                .files
+                .iter()
+                .filter(|f| {
+                    let p = f.path.to_string_lossy().to_lowercase();
+                    if p == out_lower || p == tmp_lower || p.starts_with(&format!("{out_lower}.")) {
+                        return false;
+                    }
+                    if !include.is_empty() && !include.contains(&f.ext) {
+                        return false;
+                    }
+                    f.size >= min_size_kb * 1024
+                })
+                .collect();
+            let picked: Vec<coldstore_core::scan::FileEntry> =
+                picked.into_iter().cloned().collect();
+            let opts = archive::ArchiveOptions {
+                sidecar,
+                ..Default::default()
+            };
+            let stats = archive::archive(&picked, &output, &opts)?;
+            if json {
+                println!("{}", serde_json::to_string(&stats)?);
+            } else {
+                print_archive(&stats);
+            }
+            Ok(())
+        }
+        Cmd::Extract {
+            container,
+            key,
+            dest,
+            to_original,
+        } => {
+            let parsed = if key.chars().all(|c| c.is_ascii_digit()) {
+                archive::EntryKey::Ordinal(key.parse::<u64>()?)
+            } else {
+                archive::EntryKey::Path(key)
+            };
+            let outcome = match dest {
+                Some(d) => archive::retrieve(&container, &parsed, &d)?,
+                None if to_original => archive::retrieve_to_original(&container, &parsed)?,
+                None => anyhow::bail!(
+                    "必须提供 -d/--dest 或 --to-original（拒绝把取回目标猜到默认位置）"
+                ),
+            };
+            println!(
+                "取回完成: 条目 {} ← {} → {}（{} 字节，压缩 {} 字节，SHA-256 {}，耗时 {} ms）",
+                outcome.ordinal,
+                outcome.source_path,
+                outcome.dest,
+                outcome.size,
+                outcome.compressed_size,
+                if outcome.sha_verified {
+                    "已校验一致"
+                } else {
+                    "UNVERIFIED（无哈希）"
+                },
+                outcome.elapsed_ms
+            );
+            Ok(())
+        }
+        Cmd::List { container, json } => {
+            let (_file, header, idx) = archive::open_container(&container)?;
+            if json {
+                println!("{}", serde_json::to_string(&(&header, &idx))?);
+            } else {
+                print_list(&header, &idx);
+            }
+            Ok(())
+        }
+        Cmd::Verify { container, json } => {
+            let stats = archive::verify(&container)?;
+            if json {
+                println!("{}", serde_json::to_string(&stats)?);
+            } else {
+                print_verify(&stats);
+            }
+            std::process::exit(if stats.ok { 0 } else { 1 });
+        }
+    }
+}
+
+fn print_archive(stats: &archive::ArchiveStats) {
+    println!(
+        "归档完成: {}（索引模式 {}）",
+        stats.container, stats.index_mode
+    );
+    println!(
+        "  帧数 {}   原始 {} → 压缩 {}（占比 {:.1}%）   容器 {}   最长窗口 {}   耗时 {} ms",
+        stats.frame_count,
+        format_bytes(stats.total_original),
+        format_bytes(stats.total_compressed),
+        if stats.total_original > 0 {
+            stats.total_compressed as f64 / stats.total_original as f64 * 100.0
+        } else {
+            0.0
+        },
+        format_bytes(stats.container_size),
+        stats.max_window_log,
+        stats.duration_ms
+    );
+    println!("  源文件未移动、未删除（可逆执行属 002 执行层）");
+    if stats.sidecar_written {
+        println!("  sidecar .idx 已写入（派生缓存；内嵌索引仍为唯一事实源）");
+    }
+}
+
+fn print_list(header: &archive::ContainerHeader, idx: &archive::ArchiveIndex) {
+    println!(
+        "容器 {} 帧共 {} 个（{}），索引条目 {} 条:",
+        header.frame_count,
+        header.frame_count,
+        if header.index_embedded {
+            "内嵌索引权威"
+        } else {
+            "sidecar 权威"
+        },
+        idx.entries.len()
+    );
+    println!(
+        "  {:>4}  {:>10}  {:>10}  {:>12}  {:<14}  路径",
+        "#", "原始", "压缩", "offset", "sha256[:12]"
+    );
+    for e in &idx.entries {
+        println!(
+            "  {:>4}  {:>10}  {:>10}  {:>12}  {:<14}  {}",
+            e.ordinal,
+            format_bytes(e.size),
+            format_bytes(e.compressed_size),
+            e.offset,
+            e.sha256_hex
+                .as_deref()
+                .unwrap_or("UNVERIFIED")
+                .get(..12)
+                .unwrap_or(""),
+            e.path
+        );
+    }
+}
+
+fn print_verify(stats: &archive::VerifyStats) {
+    println!(
+        "校验完成: {}   帧数 {}   已检 {} 条   原始 {} / 压缩 {}",
+        stats.container,
+        stats.frame_count,
+        stats.entries_checked,
+        format_bytes(stats.total_original),
+        format_bytes(stats.total_compressed)
+    );
+    println!(
+        "  SHA-256 失败 {}   体积不符 {}   UNVERIFIED {}   结论: {}   耗时 {} ms",
+        stats.sha_failures,
+        stats.size_failures,
+        stats.unverified_entries,
+        if stats.ok {
+            "全部通过 ✓"
+        } else {
+            "存在失败 ✗"
+        },
+        stats.duration_ms
+    );
+    for f in &stats.failures {
+        println!("    - {f}");
     }
 }
 

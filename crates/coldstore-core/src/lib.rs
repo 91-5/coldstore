@@ -18,6 +18,7 @@
 //! - every archive index entry stores the SHA-256 of the original file
 //!   content, mandatory since format v0.1.
 
+pub mod archive;
 pub mod dedupe;
 pub mod fsinfo;
 pub mod magic;

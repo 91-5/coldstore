@@ -283,11 +283,15 @@ struct ScanState {
 /// Scan `root` recursively (read-only; never writes to the scanned tree).
 pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
     let started = Instant::now();
+    // Absolute root up front: FileEntry paths (and later archive index
+    // entries) must be volume-checkable (AV-5) regardless of CLI cwd.
+    let root =
+        std::path::absolute(root).with_context(|| format!("解析扫描根失败: {}", root.display()))?;
     if !root.exists() {
         bail!("扫描根目录不存在: {}", root.display());
     }
     let meta =
-        fs::metadata(root).with_context(|| format!("无法读取根目录元数据: {}", root.display()))?;
+        fs::metadata(&root).with_context(|| format!("无法读取根目录元数据: {}", root.display()))?;
     if !meta.is_dir() {
         bail!("扫描根不是目录: {}", root.display());
     }
@@ -306,10 +310,10 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
         .any(|b| b.eq_ignore_ascii_case(&root_name))
     {
         return Ok(ScanResult {
-            root: root.to_path_buf(),
+            root: root.clone(),
             files: Vec::new(),
             skipped: vec![SkipRecord {
-                path: root.to_path_buf(),
+                path: root.clone(),
                 reason: SkipReason::BlacklistedDirectory { name: root_name },
             }],
             total_bytes: 0,
@@ -319,10 +323,10 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
     }
     if root.join(VENV_MARKER_FILE).exists() {
         return Ok(ScanResult {
-            root: root.to_path_buf(),
+            root: root.clone(),
             files: Vec::new(),
             skipped: vec![SkipRecord {
-                path: root.to_path_buf(),
+                path: root.clone(),
                 reason: SkipReason::PythonVenv {
                     marker: VENV_MARKER_FILE.to_string(),
                 },
@@ -343,7 +347,7 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
         followed_targets: HashSet::new(),
     });
 
-    walk_into(root, &state)?;
+    walk_into(&root, &state)?;
 
     // AV-4 escape hatch: follow explicitly-allowed junction targets, each
     // exactly once, cycle-guarded by the canonical visited set. Targets

@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target/
+
+# Review / task infrastructure — not project content (card OC-20261110-001 B17)
+verdicts/
+artifacts.json
+.tasks/
+artifacts/
+
+# ColdStore data artifacts: containers, indexes and quarantine data must
+# never be committed (they can be large and/or user-private)
+*.coldstore
+*.idx
+.coldstore/
+
+# OS noise
+Thumbs.db
+.DS_Store

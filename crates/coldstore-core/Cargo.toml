@@ -1,0 +1,15 @@
+[package]
+name = "coldstore-core"
+description = "ColdStore engine: scanning, gain prediction, dedup detection, zstd frame archive with single-file retrieval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
+zstd.workspace = true

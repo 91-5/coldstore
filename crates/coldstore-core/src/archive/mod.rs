@@ -884,16 +884,42 @@ mod tests {
 
     #[test]
     fn cross_volume_container_write_is_allowed() -> Result<()> {
-        // AV-5 positive case: sources on one volume, container on another
-        // (temp dir vs project drive). If both resolve to the same volume
-        // on this machine the assertion degrades gracefully.
+        // AV-5 positive case: sources on one volume, container on another.
+        // B16 hygiene: probe for a second volume at runtime instead of
+        // hardcoding a personal path; if none exists, skip gracefully —
+        // the negative-case test below still covers cross-volume logic.
         let (root, _) = build_fixture("xvol");
         let scan_res = scan(&root, &ScanOptions::default())?;
-        // Put the container next to the project drive when available.
-        let container = PathBuf::from("D:/15812/projects/coldstore/target/xvol-test.coldstore");
+        let fixture_vol = root
+            .to_string_lossy()
+            .chars()
+            .next()
+            .map(|c| c.to_ascii_uppercase());
+        let mut container = None;
+        for letter in 'D'..='Z' {
+            if Some(letter) == fixture_vol {
+                continue;
+            }
+            let drive = PathBuf::from(format!("{letter}:\\"));
+            if drive.is_dir() {
+                container = Some(
+                    drive
+                        .join("coldstore-xvol-test")
+                        .join("xvol-test.coldstore"),
+                );
+                break;
+            }
+        }
+        let Some(container) = container else {
+            eprintln!("skipping: no second volume available on this machine");
+            fs::remove_dir_all(&root).ok();
+            return Ok(());
+        };
+        fs::create_dir_all(container.parent().expect("container has parent"))?;
         let stats = archive(&scan_res.files, &container, &ArchiveOptions::default())?;
         assert_eq!(stats.frame_count, 5);
         let _ = fs::remove_file(&container);
+        fs::remove_dir_all(container.parent().expect("container has parent")).ok();
         fs::remove_dir_all(&root).ok();
         Ok(())
     }

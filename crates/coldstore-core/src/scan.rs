@@ -285,6 +285,11 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> Result<ScanResult> {
     let started = Instant::now();
     // Absolute root up front: FileEntry paths (and later archive index
     // entries) must be volume-checkable (AV-5) regardless of CLI cwd.
+    //
+    // ADV-2 (documented behaviour): `std::path::absolute` resolves a
+    // *relative* root against the **process current working directory**.
+    // CLI users get the shell's cwd semantics; embedders (002) that want
+    // cwd-independence must pass absolute paths.
     let root =
         std::path::absolute(root).with_context(|| format!("解析扫描根失败: {}", root.display()))?;
     if !root.exists() {

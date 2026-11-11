@@ -107,6 +107,9 @@ enum Cmd {
     /// 全量校验：逐帧解码 + SHA-256 比对
     Verify {
         container: PathBuf,
+        /// 并行校验线程数（默认 = 全局线程池）
+        #[arg(long)]
+        threads: Option<usize>,
         /// 输出完整 JSON
         #[arg(long)]
         json: bool,
@@ -283,8 +286,13 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Verify { container, json } => {
-            let stats = archive::verify(&container)?;
+        Cmd::Verify {
+            container,
+            threads,
+            json,
+        } => {
+            let opts = archive::VerifyOptions { threads };
+            let stats = archive::verify_with(&container, &opts)?;
             if json {
                 println!("{}", serde_json::to_string(&stats)?);
             } else {

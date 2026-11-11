@@ -112,6 +112,16 @@ pub struct VerifyStats {
     pub duration_ms: u64,
 }
 
+/// Options for [`verify_with`]. `threads: Some(n)` runs the parallel
+/// verification in a dedicated rayon pool with exactly `n` workers;
+/// `None` (default) uses the global rayon pool. Exposed for the 002
+/// execution layer (ADV-5): it will cap verify concurrency when the UI
+/// needs to keep the machine responsive during long operations.
+#[derive(Debug, Clone, Default)]
+pub struct VerifyOptions {
+    pub threads: Option<usize>,
+}
+
 /// Reader that hashes while streaming (AV-6: sha256 computed during the
 /// single compression pass — no second read of the source).
 struct HashingReader<R: Read> {
@@ -177,6 +187,13 @@ pub fn archive(
     let started = Instant::now();
     // Resolve to an absolute path up front: a bare filename has an empty
     // parent and index entries should be volume-checkable (AV-5).
+    //
+    // ADV-2 (documented behaviour): `std::path::absolute` resolves a
+    // *relative* argument against the **process current working directory**
+    // (except drive-relative forms like `D:foo`, which keep their drive).
+    // Callers embedding coldstore (002's rule engine / TUI) that want
+    // cwd-independence must pass absolute paths — the library does not
+    // second-guess the process cwd.
     let container = std::path::absolute(container)
         .with_context(|| format!("解析容器路径失败: {}", container.display()))?;
     if container.exists() {
@@ -487,6 +504,14 @@ pub fn retrieve(container: &Path, key: &index::EntryKey, dest: &Path) -> Result<
 /// Restore to the *recorded original path* without an explicit `-d`.
 /// AV-5: when the entry's volume differs from the container's volume this
 /// is rejected with entry name, both volume letters and the remediation.
+///
+/// ADV-1 (documented boundary): only drive-letter volumes (`C:` …) are
+/// compared. UNC paths (`\\server\share`), verbatim prefixes and paths
+/// without a drive component yield `None` and therefore always take the
+/// reject branch — for UNC sources the operator must use an explicit
+/// `-d <dest>`, which is volume-agnostic. This is fail-closed by design:
+/// a shared-network original can rarely be restored in place meaningfully,
+/// and guessing would risk a silent cross-device copy.
 pub fn retrieve_to_original(container: &Path, key: &index::EntryKey) -> Result<RetrieveOutcome> {
     let (_, _, idx) = open_container(container)?;
     let entry = idx.lookup(key)?;
@@ -511,8 +536,14 @@ pub fn retrieve_to_original(container: &Path, key: &index::EntryKey) -> Result<R
 
 /// Verify every frame in the container: decode each, check size + SHA-256.
 /// Frames are verified in parallel (each worker opens its own handle and
-/// touches only its entry's region).
+/// touches only its entry's region). Uses the global rayon pool; see
+/// [`verify_with`] for a threads-capped variant.
 pub fn verify(container: &Path) -> Result<VerifyStats> {
+    verify_with(container, &VerifyOptions::default())
+}
+
+/// [`verify`] with explicit concurrency control (ADV-5, reserved for 002).
+pub fn verify_with(container: &Path, opts: &VerifyOptions) -> Result<VerifyStats> {
     let started = Instant::now();
     let (_file, header, idx) = open_container(container)?;
 
@@ -520,11 +551,27 @@ pub fn verify(container: &Path) -> Result<VerifyStats> {
     // file cursor on Windows, which would make parallel seeks trample each
     // other (this exact bug produced "Unknown frame descriptor" failures).
     let container_path = container.to_path_buf();
-    let results: Vec<std::result::Result<(), String>> = idx
-        .entries
-        .par_iter()
-        .map(|entry| verify_one(&container_path, entry))
-        .collect();
+    let run = || {
+        idx.entries
+            .par_iter()
+            .map(|entry| verify_one(&container_path, entry))
+            .collect::<Vec<std::result::Result<(), String>>>()
+    };
+    let results: Vec<std::result::Result<(), String>> = match opts.threads {
+        None => run(),
+        Some(n) => {
+            // fail-closed: rayon treats 0 as "use default", silently
+            // ignoring the caller's request (card rule: no silent skips).
+            if n == 0 {
+                bail!("verify --threads 必须为 ≥1，收到 0");
+            }
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .with_context(|| format!("构建 {n} 线程校验线程池失败"))?
+                .install(run)
+        }
+    };
 
     let mut stats = VerifyStats {
         container: container.display().to_string(),
@@ -883,6 +930,29 @@ mod tests {
     }
 
     #[test]
+    fn verify_threads_zero_fails_closed() {
+        // ADV-5: `--threads 0` must be rejected, not silently treated as
+        // "use default pool" (rayon would ignore it).
+        let (root, files) = build_fixture("vt0");
+        let scan_res = scan(&root, &ScanOptions::default()).expect("scan");
+        let container = root.join("vt0.coldstore");
+        archive(&scan_res.files, &container, &ArchiveOptions::default()).expect("archive");
+        let err = verify_with(&container, &VerifyOptions { threads: Some(0) });
+        assert!(err.is_err(), "threads=0 must fail");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(
+            msg.contains('0'),
+            "error should mention the bad value: {msg}"
+        );
+        // threads=1 still works (dedicated pool path).
+        let stats = verify_with(&container, &VerifyOptions { threads: Some(1) })
+            .expect("threads=1 must succeed");
+        assert!(stats.ok);
+        assert_eq!(stats.entries_checked, files.len() as u64);
+        let _ = fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn cross_volume_container_write_is_allowed() -> Result<()> {
         // AV-5 positive case: sources on one volume, container on another.
         // B16 hygiene: probe for a second volume at runtime instead of
@@ -902,9 +972,11 @@ mod tests {
             }
             let drive = PathBuf::from(format!("{letter}:\\"));
             if drive.is_dir() {
+                // pid suffix avoids collisions between concurrent test runs
+                // on the same drive root (ADV-4).
                 container = Some(
                     drive
-                        .join("coldstore-xvol-test")
+                        .join(format!("coldstore-xvol-test-{}", std::process::id()))
                         .join("xvol-test.coldstore"),
                 );
                 break;

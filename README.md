@@ -26,16 +26,17 @@ ColdStore answers three questions before touching a single byte:
 
 Independent-frame archives trade ~1–2% of ratio for single-file random
 retrieval. Solid `.tar.zst` vs per-file frames on the same corpus
-(Windows font binaries, 22 MB): **−0.23%** (frames slightly *smaller*).
-Cross-checking the two encodings:
+(`glasspill/src`, 27 files, 36.4 MB): **−0.23%** (frames slightly
+*smaller*). Cross-checking the two encodings:
 
 | Corpus | Files | solid tar.zst | per-file frames | delta |
 |---|---|---|---|---|
-| Windows font binaries (22 MB) | 8 | baseline | −0.23% | ≤ ±5% design gate ✅ |
+| `glasspill/src` (36.4 MB) | 27 | baseline | −0.23% | ≤ ±5% design gate ✅ |
 
 Frame-level retrieval works even for very large frames
-(`window_log = 27`, LDM): retrieving a 19 MB font from the *middle* of a
-22 MB archive took **58 ms** with a byte-exact SHA-256 match. The frame
+(`window_log = 27`, LDM): retrieving a 19 MB file from the *middle* of a
+136 MB, 7-frame archive took **58 ms** with a byte-exact SHA-256 match.
+The frame
 header self-describes its window size, and every retrieval is
 cross-checkable with the stock `zstd` CLI:
 

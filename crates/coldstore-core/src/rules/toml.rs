@@ -56,12 +56,45 @@ impl Default for ColdnessConfig {
     }
 }
 
+/// Quarantine configuration (card D4; ADV-N5: retention must surface as a
+/// concrete date, never "7 days later").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuarantineSettings {
+    /// Undo window in days. Expiry is *reported*, never auto-deleted
+    /// (hard rule 3: no silent deletion, ever).
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u64,
+    /// Quarantine root override (default %USERPROFILE%\.coldstore\quarantine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// Archive container root override (default %USERPROFILE%\.coldstorerchive).
+    /// ADV-N5: container and quarantine must share a volume (hard rule 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_root: Option<String>,
+}
+
+fn default_retention_days() -> u64 {
+    7
+}
+
+impl Default for QuarantineSettings {
+    fn default() -> Self {
+        QuarantineSettings {
+            retention_days: default_retention_days(),
+            root: None,
+            archive_root: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConfigToml {
     #[serde(default, rename = "rule")]
     rules: Vec<Rule>,
     #[serde(default)]
     coldness: Option<ColdnessConfig>,
+    #[serde(default)]
+    quarantine: Option<QuarantineSettings>,
     /// ADV-N7: hit total above this (GB) forces a second confirmation
     /// before `--execute`.
     #[serde(default = "default_confirm_threshold_gb")]
@@ -77,6 +110,7 @@ fn default_confirm_threshold_gb() -> u64 {
 pub struct AppConfig {
     pub rules: Vec<Rule>,
     pub coldness: ColdnessConfig,
+    pub quarantine: QuarantineSettings,
     pub confirm_threshold_gb: u64,
 }
 
@@ -132,6 +166,7 @@ pub fn parse_config(text: &str) -> Result<AppConfig> {
     Ok(AppConfig {
         rules: raw.rules,
         coldness: raw.coldness.unwrap_or_default(),
+        quarantine: raw.quarantine.unwrap_or_default(),
         confirm_threshold_gb: raw.confirm_threshold_gb,
     })
 }
@@ -141,6 +176,7 @@ pub fn to_toml(cfg: &AppConfig) -> Result<String> {
     let raw = ConfigToml {
         rules: cfg.rules.clone(),
         coldness: Some(cfg.coldness.clone()),
+        quarantine: Some(cfg.quarantine.clone()),
         confirm_threshold_gb: cfg.confirm_threshold_gb,
     };
     toml::to_string_pretty(&raw).context("TOML 序列化失败")

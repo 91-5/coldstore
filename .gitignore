@@ -7,11 +7,15 @@ artifacts.json
 .tasks/
 artifacts/
 
-# ColdStore data artifacts: containers, indexes and quarantine data must
-# never be committed (they can be large and/or user-private)
+# ColdStore data artifacts: containers, indexes, quarantine and journals
+# must never be committed (large and/or user-private) — ADV-N8 lists the
+# quarantine/journal locations explicitly so even a misplaced copy is
+# never committed
 *.coldstore
 *.idx
 .coldstore/
+quarantine/
+journal/
 
 # OS noise
 Thumbs.db

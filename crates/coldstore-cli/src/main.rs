@@ -125,11 +125,52 @@ enum Cmd {
         json: bool,
     },
     /// 手动标记为冷（持久化，重启仍生效）
-    MarkCold { path: PathBuf },
+    /// 执行规则（默认 dry-run！--execute 才写盘——ADV-N4；ADV-N7 超阈需 --yes）
+    Run {
+        /// 扫描根目录
+        path: PathBuf,
+        /// 规则名
+        #[arg(long)]
+        rule: String,
+        /// 真正执行（唯一写盘开关）
+        #[arg(long)]
+        execute: bool,
+        /// ADV-N7 二次确认（命中量超阈值时必需）
+        #[arg(long)]
+        yes: bool,
+        /// 归档容器路径（默认 %USERPROFILE%\.coldstorerchive\）
+        #[arg(long)]
+        container: Option<PathBuf>,
+        /// 配置目录覆盖
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+        /// 隔离区根目录覆盖
+        #[arg(long = "quarantine-root")]
+        quarantine_root: Option<PathBuf>,
+        /// journal 目录覆盖
+        #[arg(long = "journal-dir")]
+        journal_dir: Option<PathBuf>,
+    },
+    /// 隔离区：list / delete（需 --confirm）/ recover（--continue|--abort）
+    Quarantine {
+        #[command(subcommand)]
+        cmd: QuarantineCmd,
+    },
+    /// 撤销一个批次（还原到原路径；隔离期内被改的文件不覆盖——ADV-N3）
+    Undo {
+        batch: String,
+    },
+    MarkCold {
+        path: PathBuf,
+    },
     /// 手动标记为热（持久化，重启仍生效）
-    MarkHot { path: PathBuf },
+    MarkHot {
+        path: PathBuf,
+    },
     /// 清除手动标记
-    MarkClear { path: PathBuf },
+    MarkClear {
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -146,6 +187,26 @@ enum RuleCmd {
         /// 输出完整 JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum QuarantineCmd {
+    /// 列出批次（批次/来源/占用/保留期到期日——B11）
+    List,
+    /// 立即释放（真删；硬约束 3：必须 --confirm）
+    Delete {
+        batch: String,
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// 恢复中断批次（B13）：--continue 续跑 / --abort 回滚
+    Recover {
+        batch: String,
+        #[arg(long = "continue")]
+        cont: bool,
+        #[arg(long)]
+        abort: bool,
     },
 }
 
@@ -235,6 +296,35 @@ fn run(cli: Cli) -> Result<()> {
             RuleCmd::Test { path, json } => cmd::rule::RuleCmd::Test { path, json },
         }),
         Cmd::Plan { path, json } => cmd::plan::run(cmd::plan::PlanArgs { path, json }),
+        Cmd::Run {
+            path,
+            rule,
+            execute,
+            yes,
+            container,
+            config_dir,
+            quarantine_root,
+            journal_dir,
+        } => cmd::run::run(cmd::run::RunArgs {
+            path,
+            rule,
+            execute,
+            yes,
+            container,
+            config_dir,
+            quarantine_root,
+            journal_dir,
+        }),
+        Cmd::Quarantine { cmd } => cmd::quarantine::run(match cmd {
+            QuarantineCmd::List => cmd::quarantine::QuarantineCmd::List,
+            QuarantineCmd::Delete { batch, confirm } => {
+                cmd::quarantine::QuarantineCmd::Delete { batch, confirm }
+            }
+            QuarantineCmd::Recover { batch, cont, abort } => {
+                cmd::quarantine::QuarantineCmd::Recover { batch, cont, abort }
+            }
+        }),
+        Cmd::Undo { batch } => cmd::undo::run(cmd::undo::UndoArgs { batch }),
         Cmd::MarkCold { path } => cmd::mark::mark_cold(cmd::mark::MarkArgs { path }),
         Cmd::MarkHot { path } => cmd::mark::mark_hot(cmd::mark::MarkArgs { path }),
         Cmd::MarkClear { path } => cmd::mark::mark_clear(cmd::mark::MarkArgs { path }),

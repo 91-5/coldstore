@@ -8,8 +8,11 @@ pub mod list;
 pub mod mark;
 pub mod plan;
 pub mod predict;
+pub mod quarantine;
 pub mod rule;
+pub mod run;
 pub mod scan;
+pub mod undo;
 pub mod verify;
 
 use std::time::SystemTime;

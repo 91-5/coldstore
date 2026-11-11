@@ -153,6 +153,7 @@ dependencies = [
  "coldstore-core",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -25,6 +25,7 @@ pub mod default_rules;
 pub mod fsinfo;
 pub mod magic;
 pub mod predict;
+pub mod quarantine;
 pub mod rules;
 pub mod scan;
 

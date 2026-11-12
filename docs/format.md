@@ -1,4 +1,4 @@
-# `.coldstore` container format (draft, v0.1)
+# `.coldstore` container format (v0.1)
 
 > Finalized with the archive milestone; this draft records the committed
 > design so downstream work can code against it.

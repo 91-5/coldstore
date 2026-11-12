@@ -2,6 +2,7 @@
 //! module owns one command's behavior and its human printer.
 
 pub mod archive;
+pub mod compress;
 pub mod dedupe;
 pub mod extract;
 pub mod list;

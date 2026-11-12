@@ -13,10 +13,11 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
+use coldstore_core::ntfs::{self, CompressOptions, CompressionMode};
 use coldstore_core::predict::{format_bytes, predict, PredictOptions, Verdict};
 use coldstore_core::quarantine::{self, QuarantineConfig};
 use coldstore_core::rules::toml::{load_config, AppConfig};
-use coldstore_core::rules::{MatchMode, RuleAction, RuleSet};
+use coldstore_core::rules::{MatchMode, Rule, RuleAction, RuleSet};
 use coldstore_core::scan::{self, FileEntry};
 
 pub struct RunArgs {
@@ -92,9 +93,6 @@ pub fn run(args: RunArgs) -> Result<()> {
             );
             return Ok(());
         }
-        RuleAction::NtfsCompress if args.execute => {
-            bail!("ntfs_compress 执行将在 P3（NTFS 压缩执行）落地——本阶段仅支持 dry-run");
-        }
         RuleAction::DedupeHardlink if args.execute => {
             bail!("dedupe_hardlink 执行将在 P4（去重执行）落地——本阶段仅支持 dry-run");
         }
@@ -135,10 +133,7 @@ pub fn run(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    // execute path (only action == Archive reaches here in P2)
-    if rule.action != RuleAction::Archive {
-        bail!("内部状态错误: 非归档动作不应到达执行路径");
-    }
+    // execute path
     if candidates.is_empty() {
         println!(
             "规则 {} 无候选文件（全部被预测器否决或无命中）——无事可做",
@@ -154,6 +149,30 @@ pub fn run(args: RunArgs) -> Result<()> {
         );
     }
 
+    match rule.action {
+        RuleAction::Archive => execute_archive(&rule, &candidates, candidate_bytes, &cfg, &args),
+        RuleAction::NtfsCompress => execute_ntfs_compress(&rule, &candidates),
+        RuleAction::DedupeHardlink => {
+            bail!("dedupe_hardlink 执行将在 P4（去重执行）落地——本阶段仅支持 dry-run")
+        }
+        RuleAction::Skip => {
+            println!(
+                "规则 {} 的动作是 skip（显式保护）——没有可执行内容",
+                rule.name
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The P2 archive path — the six-step sequence (unchanged by P3).
+fn execute_archive(
+    rule: &Rule,
+    candidates: &[FileEntry],
+    candidate_bytes: u64,
+    cfg: &AppConfig,
+    args: &RunArgs,
+) -> Result<()> {
     let mut qcfg = QuarantineConfig::resolve(&cfg.quarantine)?;
     if let Some(r) = &args.quarantine_root {
         qcfg.root = std::path::absolute(r)?;
@@ -176,17 +195,50 @@ pub fn run(args: RunArgs) -> Result<()> {
         format_bytes(candidate_bytes),
         container.display()
     );
-    let stats = quarantine::archive_batch(&candidates, &container, &qcfg)?;
+    let stats = quarantine::archive_batch(candidates, &container, &qcfg)?;
     println!(
         "  批次 {} 完成: {} 个文件已移入隔离区（SHA-256 全部经第 3 步取回校验）",
         stats.batch_id, stats.files
     );
-    let expiry = expiry_note(&stats.batch_id, &qcfg, &cfg)?;
+    let expiry = expiry_note(&stats.batch_id, &qcfg, cfg)?;
     println!(
         "  隔离区仍占用 {}（硬约束 4：归档≠释放）",
         format_bytes(stats.bytes)
     );
     println!("  保留期至 {expiry}；到期不会自动删除，确认后 `coldstore quarantine delete {} --confirm` 释放", stats.batch_id);
+    Ok(())
+}
+
+/// The P3 NTFS-compression path.
+///
+/// NTFS compression only flips a file attribute — it never deletes,
+/// moves or renames anything — so the P2 "every mutation lives inside a
+/// journaled sequence function" rule is satisfied vacuously: this path
+/// performs no filesystem deletion or renaming at all.
+fn execute_ntfs_compress(rule: &Rule, candidates: &[FileEntry]) -> Result<()> {
+    let opts = CompressOptions {
+        mode: CompressionMode::Enable,
+        ..Default::default()
+    };
+    let plan = ntfs::plan_compression(candidates, &opts);
+    if plan.files.is_empty() {
+        println!(
+            "规则 {} 的候选全部被执行器级规则跳过（已压缩格式 / 系统目录 / 敏感格式）——无事可做",
+            rule.name
+        );
+        for (reason, count) in &plan.skipped_by_reason {
+            println!("  跳过 {count} 个 — {reason}");
+        }
+        return Ok(());
+    }
+    println!(
+        "执行 NTFS 透明压缩: 规则 {} → {} 个文件 / {}（异步执行，Ctrl-C 可安全中断并续做）",
+        rule.name,
+        plan.files.len(),
+        format_bytes(plan.bytes)
+    );
+    let stats = super::compress::execute(plan.files, opts, false)?;
+    super::compress::print_stats(&stats, false);
     Ok(())
 }
 

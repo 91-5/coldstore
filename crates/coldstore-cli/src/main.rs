@@ -5,6 +5,7 @@
 //! write switch. Error output always carries path + reason.
 
 mod cmd;
+mod ctrlc;
 
 use std::path::PathBuf;
 
@@ -116,6 +117,64 @@ enum Cmd {
     Rule {
         #[command(subcommand)]
         cmd: RuleCmd,
+    },
+    /// NTFS 透明压缩：启用（默认 dry-run；--execute 才写盘——ADV-N4）
+    Compress {
+        /// 目标目录
+        path: PathBuf,
+        /// 真正执行（唯一写盘开关）
+        #[arg(long)]
+        execute: bool,
+        /// ADV-N7 二次确认（批次超阈值时必需）
+        #[arg(long)]
+        yes: bool,
+        /// 并发工作线程数（默认 4）
+        #[arg(long)]
+        threads: Option<usize>,
+        /// 限速（MiB/s；默认不限）
+        #[arg(long = "rate-limit", value_name = "MIB_S")]
+        rate_limit: Option<u64>,
+        /// 覆盖执行器级格式跳过（系统目录排除永远不可覆盖）
+        #[arg(long)]
+        force: bool,
+        /// 最小体积（KB，0=不限）
+        #[arg(long = "min-size-kb", default_value_t = 0)]
+        min_size_kb: u64,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 解除 NTFS 透明压缩（可逆：COMPRESSION_FORMAT_NONE）
+    Decompress {
+        /// 目标目录
+        path: PathBuf,
+        /// 真正执行（唯一写盘开关）
+        #[arg(long)]
+        execute: bool,
+        /// ADV-N7 二次确认（批次超阈值时必需）
+        #[arg(long)]
+        yes: bool,
+        /// 并发工作线程数（默认 4）
+        #[arg(long)]
+        threads: Option<usize>,
+        /// 限速（MiB/s；默认不限）
+        #[arg(long = "rate-limit", value_name = "MIB_S")]
+        rate_limit: Option<u64>,
+        /// 覆盖执行器级格式跳过（系统目录排除永远不可覆盖）
+        #[arg(long)]
+        force: bool,
+        /// 最小体积（KB，0=不限）
+        #[arg(long = "min-size-kb", default_value_t = 0)]
+        min_size_kb: u64,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
     },
     /// 一屏规划：占用归因 + 规则命中 + 预计节省 + 冷热分布（只读）
     Plan {
@@ -294,6 +353,50 @@ fn run(cli: Cli) -> Result<()> {
             RuleCmd::Enable { name } => cmd::rule::RuleCmd::Enable { name },
             RuleCmd::Disable { name } => cmd::rule::RuleCmd::Disable { name },
             RuleCmd::Test { path, json } => cmd::rule::RuleCmd::Test { path, json },
+        }),
+        Cmd::Compress {
+            path,
+            execute,
+            yes,
+            threads,
+            rate_limit,
+            force,
+            min_size_kb,
+            config_dir,
+            json,
+        } => cmd::compress::run(cmd::compress::CompressArgs {
+            path,
+            mode: coldstore_core::ntfs::CompressionMode::Enable,
+            execute,
+            yes,
+            threads,
+            rate_limit,
+            force,
+            min_size_kb,
+            config_dir,
+            json,
+        }),
+        Cmd::Decompress {
+            path,
+            execute,
+            yes,
+            threads,
+            rate_limit,
+            force,
+            min_size_kb,
+            config_dir,
+            json,
+        } => cmd::compress::run(cmd::compress::CompressArgs {
+            path,
+            mode: coldstore_core::ntfs::CompressionMode::Disable,
+            execute,
+            yes,
+            threads,
+            rate_limit,
+            force,
+            min_size_kb,
+            config_dir,
+            json,
         }),
         Cmd::Plan { path, json } => cmd::plan::run(cmd::plan::PlanArgs { path, json }),
         Cmd::Run {

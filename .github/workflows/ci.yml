@@ -17,7 +17,7 @@ jobs:
       - name: Core sources must be tracked (not gitignore-shadowed)
         run: |
           $missing = @()
-          foreach ($f in @('crates/coldstore-core/src/quarantine/mod.rs','crates/coldstore-core/src/quarantine/journal.rs')) {
+          foreach ($f in @('crates/coldstore-core/src/quarantine/mod.rs','crates/coldstore-core/src/quarantine/journal.rs','crates/coldstore-core/src/ntfs/mod.rs','crates/coldstore-core/src/ntfs/sys.rs')) {
             git ls-files --error-unmatch $f 2>$null
             if ($LASTEXITCODE -ne 0) { $missing += $f }
           }

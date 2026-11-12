@@ -7,15 +7,22 @@ artifacts.json
 .tasks/
 artifacts/
 
-# ColdStore data artifacts: containers, indexes, quarantine and journals
-# must never be committed (large and/or user-private) — ADV-N8 lists the
-# quarantine/journal locations explicitly so even a misplaced copy is
-# never committed
+# ColdStore data artifacts: containers, indexes and the user-data
+# quarantine/journal directories must never be committed (large and/or
+# user-private) — ADV-N8 lists the quarantine/journal locations
+# explicitly so even a misplaced copy is never committed.
+# NOTE (P2 review B1): rules must stay anchored/root-scoped — bare
+# "quarantine/" matches at EVERY tree level and silently ignored
+# crates/coldstore-core/src/quarantine/{mod,journal}.rs, so the P2 core
+# sources never entered the commit (clean checkout failed E0583).
+# User-data quarantine lives under %USERPROFILE%\.coldstore\ (covered
+# by .coldstore/); the two lines below are the historical user-data
+# locations, kept root-anchored for misplaced-copy protection only.
 *.coldstore
 *.idx
 .coldstore/
-quarantine/
-journal/
+/.coldstore-quarantine/
+/.coldstore-journal/
 
 # OS noise
 Thumbs.db

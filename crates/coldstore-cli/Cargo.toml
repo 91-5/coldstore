@@ -16,6 +16,11 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+# Already in the tree via ratatui — used to render the TUI's text dump with
+# the same column arithmetic a real terminal uses (wide CJK glyphs).
+unicode-width = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

@@ -15,24 +15,69 @@ use coldstore_core::scan;
 use std::collections::BTreeMap;
 
 pub enum RuleCmd {
-    List,
-    Enable { name: String },
-    Disable { name: String },
-    Test { path: PathBuf, json: bool },
+    List {
+        json: bool,
+        config_dir: Option<PathBuf>,
+    },
+    Enable {
+        name: String,
+        json: bool,
+        config_dir: Option<PathBuf>,
+    },
+    Disable {
+        name: String,
+        json: bool,
+        config_dir: Option<PathBuf>,
+    },
+    Test {
+        path: PathBuf,
+        json: bool,
+    },
 }
 
 pub fn run(cmd: RuleCmd) -> Result<()> {
     match cmd {
-        RuleCmd::List => list(),
-        RuleCmd::Enable { name } => set_enabled(&name, true),
-        RuleCmd::Disable { name } => set_enabled(&name, false),
+        RuleCmd::List { json, config_dir } => list(json, config_dir.as_deref()),
+        RuleCmd::Enable {
+            name,
+            json,
+            config_dir,
+        } => set_enabled(&name, true, json, config_dir.as_deref()),
+        RuleCmd::Disable {
+            name,
+            json,
+            config_dir,
+        } => set_enabled(&name, false, json, config_dir.as_deref()),
         RuleCmd::Test { path, json } => test(&path, json),
     }
 }
 
-fn list() -> Result<()> {
-    let base = coldstore_core::rules::toml::config_dir();
+fn list(json: bool, config_dir: Option<&Path>) -> Result<()> {
+    let base = match config_dir {
+        Some(d) => std::path::absolute(d)?,
+        None => coldstore_core::rules::toml::config_dir(),
+    };
     let (cfg, source) = load_config(&base)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "config_dir": base.display().to_string(),
+                "config_source": source.describe(),
+                "rules": cfg.rules.iter().map(|r| serde_json::json!({
+                    "name": r.name,
+                    "priority": r.priority,
+                    "action": r.action.as_display(),
+                    "enabled": r.enabled,
+                    "note": r.note,
+                    "match_path": r.match_path,
+                    "match_ext": r.match_ext,
+                    "min_size_mb": r.min_size_mb,
+                })).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
     println!("规则配置（{}）: {}", base.display(), source.describe());
     println!(
         "  {:>3}  {:<16} {:<16} {:<8} 条件",
@@ -60,13 +105,32 @@ fn list() -> Result<()> {
             if r.enabled { "是" } else { "否" },
             cond.trim_end()
         );
+        if let Some(note) = &r.note {
+            println!("        说明: {note}");
+        }
     }
     Ok(())
 }
 
-fn set_enabled(name: &str, enabled: bool) -> Result<()> {
-    let base = coldstore_core::rules::toml::config_dir();
+fn set_enabled(name: &str, enabled: bool, json: bool, config_dir: Option<&Path>) -> Result<()> {
+    let base = match config_dir {
+        Some(d) => std::path::absolute(d)?,
+        None => coldstore_core::rules::toml::config_dir(),
+    };
     let cfg = set_rule_enabled(&base, name, enabled)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "rule": name,
+                "enabled": enabled,
+                "enabled_count": cfg.rules.iter().filter(|r| r.enabled).count(),
+                "rules_total": cfg.rules.len(),
+                "config_dir": base.display().to_string(),
+            })
+        );
+        return Ok(());
+    }
     println!(
         "已{}规则 {}（当前启用 {} / {} 条）",
         if enabled { "启用" } else { "停用" },

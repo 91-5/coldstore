@@ -95,6 +95,9 @@ enum Cmd {
         /// 还原到记录的原路径（跨卷将被拒绝——AV-5）
         #[arg(long)]
         to_original: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
     },
     /// 列出容器内容（索引 fail-closed）
     List {
@@ -179,6 +182,9 @@ enum Cmd {
     /// 一屏规划：占用归因 + 规则命中 + 预计节省 + 冷热分布（只读）
     Plan {
         path: PathBuf,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
         /// 输出完整 JSON（逐字节可复现）
         #[arg(long)]
         json: bool,
@@ -209,8 +215,11 @@ enum Cmd {
         /// journal 目录覆盖
         #[arg(long = "journal-dir")]
         journal_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
     },
-    /// 隔离区：list / delete（需 --confirm）/ recover（--continue|--abort）
+    /// 隔离区：list / restore / delete（需 --confirm）/ recover（--continue|--abort）
     Quarantine {
         #[command(subcommand)]
         cmd: QuarantineCmd,
@@ -221,28 +230,87 @@ enum Cmd {
         /// ADV-N3：保留归档容器（容器里是每个已还原文件的独立校验副本）
         #[arg(long = "keep-container")]
         keep_container: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
     },
+    /// 手动标记为冷（持久化，重启仍生效）
     MarkCold {
         path: PathBuf,
+        /// 配置目录覆盖（标记与配置同目录）
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
     },
     /// 手动标记为热（持久化，重启仍生效）
     MarkHot {
         path: PathBuf,
+        /// 配置目录覆盖（标记与配置同目录）
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
     },
     /// 清除手动标记
     MarkClear {
         path: PathBuf,
+        /// 配置目录覆盖（标记与配置同目录）
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 交互式终端界面：扫描 → 分析 → 勾选 → 执行（card D6）
+    Tui {
+        /// 扫描根目录
+        path: PathBuf,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 渲染一帧到标准输出后退出（无 TTY 环境下可脚本化冒烟）
+        #[arg(long = "render-once")]
+        render_once: bool,
+        /// 渲染一帧后模拟按下 q 退出（冒烟测试用）
+        #[arg(long = "smoke")]
+        smoke: bool,
     },
 }
 
 #[derive(Subcommand)]
 enum RuleCmd {
     /// 列出规则表
-    List,
+    List {
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+    },
     /// 启用一条规则（写配置文件）
-    Enable { name: String },
+    Enable {
+        name: String,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+    },
     /// 停用一条规则（写配置文件）
-    Disable { name: String },
+    Disable {
+        name: String,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+    },
     /// 试算：每条规则会命中什么（只展示，不执行——B16）
     Test {
         path: PathBuf,
@@ -255,12 +323,29 @@ enum RuleCmd {
 #[derive(Subcommand)]
 enum QuarantineCmd {
     /// 列出批次（批次/来源/占用/保留期到期日——B11）
-    List,
+    List {
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 取回批次（文件回到原路径；默认保留归档容器作为安全网）
+    Restore {
+        batch: String,
+        /// 同时移除归档容器（= 完整回滚，与 undo 默认行为一致）
+        #[arg(long = "remove-container")]
+        remove_container: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// 立即释放（真删；硬约束 3：必须 --confirm）
     Delete {
         batch: String,
         #[arg(long)]
         confirm: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
     },
     /// 恢复中断批次（B13）：--continue 续跑 / --abort 回滚
     Recover {
@@ -269,6 +354,9 @@ enum QuarantineCmd {
         cont: bool,
         #[arg(long)]
         abort: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -335,11 +423,13 @@ fn run(cli: Cli) -> Result<()> {
             key,
             dest,
             to_original,
+            json,
         } => cmd::extract::run(cmd::extract::ExtractArgs {
             container,
             key,
             dest,
             to_original,
+            json,
         }),
         Cmd::List { container, json } => cmd::list::run(cmd::list::ListArgs { container, json }),
         Cmd::Verify {
@@ -352,9 +442,25 @@ fn run(cli: Cli) -> Result<()> {
             json,
         }),
         Cmd::Rule { cmd } => cmd::rule::run(match cmd {
-            RuleCmd::List => cmd::rule::RuleCmd::List,
-            RuleCmd::Enable { name } => cmd::rule::RuleCmd::Enable { name },
-            RuleCmd::Disable { name } => cmd::rule::RuleCmd::Disable { name },
+            RuleCmd::List { json, config_dir } => cmd::rule::RuleCmd::List { json, config_dir },
+            RuleCmd::Enable {
+                name,
+                json,
+                config_dir,
+            } => cmd::rule::RuleCmd::Enable {
+                name,
+                json,
+                config_dir,
+            },
+            RuleCmd::Disable {
+                name,
+                json,
+                config_dir,
+            } => cmd::rule::RuleCmd::Disable {
+                name,
+                json,
+                config_dir,
+            },
             RuleCmd::Test { path, json } => cmd::rule::RuleCmd::Test { path, json },
         }),
         Cmd::Compress {
@@ -401,7 +507,15 @@ fn run(cli: Cli) -> Result<()> {
             config_dir,
             json,
         }),
-        Cmd::Plan { path, json } => cmd::plan::run(cmd::plan::PlanArgs { path, json }),
+        Cmd::Plan {
+            path,
+            config_dir,
+            json,
+        } => cmd::plan::run(cmd::plan::PlanArgs {
+            path,
+            json,
+            config_dir,
+        }),
         Cmd::Run {
             path,
             rule,
@@ -411,6 +525,7 @@ fn run(cli: Cli) -> Result<()> {
             config_dir,
             quarantine_root,
             journal_dir,
+            json,
         } => cmd::run::run(cmd::run::RunArgs {
             path,
             rule,
@@ -420,25 +535,86 @@ fn run(cli: Cli) -> Result<()> {
             config_dir,
             quarantine_root,
             journal_dir,
+            json,
         }),
         Cmd::Quarantine { cmd } => cmd::quarantine::run(match cmd {
-            QuarantineCmd::List => cmd::quarantine::QuarantineCmd::List,
-            QuarantineCmd::Delete { batch, confirm } => {
-                cmd::quarantine::QuarantineCmd::Delete { batch, confirm }
-            }
-            QuarantineCmd::Recover { batch, cont, abort } => {
-                cmd::quarantine::QuarantineCmd::Recover { batch, cont, abort }
-            }
+            QuarantineCmd::List { json } => cmd::quarantine::QuarantineCmd::List { json },
+            QuarantineCmd::Restore {
+                batch,
+                remove_container,
+                json,
+            } => cmd::quarantine::QuarantineCmd::Restore {
+                batch,
+                keep_container: !remove_container,
+                json,
+            },
+            QuarantineCmd::Delete {
+                batch,
+                confirm,
+                json,
+            } => cmd::quarantine::QuarantineCmd::Delete {
+                batch,
+                confirm,
+                json,
+            },
+            QuarantineCmd::Recover {
+                batch,
+                cont,
+                abort,
+                json,
+            } => cmd::quarantine::QuarantineCmd::Recover {
+                batch,
+                cont,
+                abort,
+                json,
+            },
         }),
         Cmd::Undo {
             batch,
             keep_container,
+            json,
         } => cmd::undo::run(cmd::undo::UndoArgs {
             batch,
             keep_container,
+            json,
         }),
-        Cmd::MarkCold { path } => cmd::mark::mark_cold(cmd::mark::MarkArgs { path }),
-        Cmd::MarkHot { path } => cmd::mark::mark_hot(cmd::mark::MarkArgs { path }),
-        Cmd::MarkClear { path } => cmd::mark::mark_clear(cmd::mark::MarkArgs { path }),
+        Cmd::MarkCold {
+            path,
+            config_dir,
+            json,
+        } => cmd::mark::mark_cold(cmd::mark::MarkArgs {
+            path,
+            json,
+            config_dir,
+        }),
+        Cmd::MarkHot {
+            path,
+            config_dir,
+            json,
+        } => cmd::mark::mark_hot(cmd::mark::MarkArgs {
+            path,
+            json,
+            config_dir,
+        }),
+        Cmd::MarkClear {
+            path,
+            config_dir,
+            json,
+        } => cmd::mark::mark_clear(cmd::mark::MarkArgs {
+            path,
+            json,
+            config_dir,
+        }),
+        Cmd::Tui {
+            path,
+            config_dir,
+            render_once,
+            smoke,
+        } => cmd::tui::run(cmd::tui::TuiArgs {
+            path,
+            config_dir,
+            render_once,
+            smoke,
+        }),
     }
 }

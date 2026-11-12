@@ -13,6 +13,7 @@ pub mod quarantine;
 pub mod rule;
 pub mod run;
 pub mod scan;
+pub mod tui;
 pub mod undo;
 pub mod verify;
 

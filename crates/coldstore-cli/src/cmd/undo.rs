@@ -14,6 +14,8 @@ pub struct UndoArgs {
     /// container holds an independently verified copy of every restored
     /// file — an extra safety net for a user who is not yet sure).
     pub keep_container: bool,
+    /// Machine-readable output (card D6: every subcommand supports --json).
+    pub json: bool,
 }
 
 pub fn run(args: UndoArgs) -> Result<()> {
@@ -28,17 +30,21 @@ pub fn run(args: UndoArgs) -> Result<()> {
     }
 
     let stats = quarantine::undo_batch_with(&args.batch, &qcfg, args.keep_container)?;
-    let container_note = if !stats.container_kept.is_empty() {
-        format!("已按 --keep-container 保留: {}", stats.container_kept)
-    } else if stats.container_removed {
-        "已移除".to_string()
+    if args.json {
+        println!("{}", serde_json::to_string(&stats)?);
     } else {
-        "不存在/已清理".to_string()
-    };
-    println!(
-        "撤销批次 {}: 还原 {} 个文件到原路径（SHA-256 一致），隔离区对应项已清除，容器{}",
-        args.batch, stats.restored, container_note
-    );
+        let container_note = if !stats.container_kept.is_empty() {
+            format!("已按 --keep-container 保留: {}", stats.container_kept)
+        } else if stats.container_removed {
+            "已移除".to_string()
+        } else {
+            "不存在/已清理".to_string()
+        };
+        println!(
+            "撤销批次 {}: 还原 {} 个文件到原路径（SHA-256 一致），隔离区对应项已清除，容器{}",
+            args.batch, stats.restored, container_note
+        );
+    }
     if stats.conflicts > 0 {
         bail!(
             "发现 {} 处撤销冲突（ADV-N3）——以下文件在隔离期内被修改，隔离区副本已保留、\

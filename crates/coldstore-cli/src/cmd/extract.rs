@@ -11,6 +11,8 @@ pub struct ExtractArgs {
     pub key: String,
     pub dest: Option<PathBuf>,
     pub to_original: bool,
+    /// Machine-readable output (card D6: every subcommand supports --json).
+    pub json: bool,
 }
 
 pub fn run(args: ExtractArgs) -> Result<()> {
@@ -24,6 +26,10 @@ pub fn run(args: ExtractArgs) -> Result<()> {
         None if args.to_original => archive::retrieve_to_original(&args.container, &parsed)?,
         None => anyhow::bail!("必须提供 -d/--dest 或 --to-original（拒绝把取回目标猜到默认位置）"),
     };
+    if args.json {
+        println!("{}", serde_json::to_string(&outcome)?);
+        return Ok(());
+    }
     println!(
         "取回完成: 条目 {} ← {} → {}（{} 字节，压缩 {} 字节，SHA-256 {}，耗时 {} ms）",
         outcome.ordinal,

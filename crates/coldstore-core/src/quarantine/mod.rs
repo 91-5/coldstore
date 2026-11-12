@@ -130,6 +130,9 @@ pub struct UndoStats {
     pub conflicts: u64,
     pub conflict_files: Vec<String>,
     pub container_removed: bool,
+    /// Set when the caller asked to keep the archive container (ADV-N3
+    /// `--keep-container`): the container path that was left on disk.
+    pub container_kept: String,
 }
 
 /// Batch identifier: local-wall-clock-ish UTC stamp + entropy suffix.
@@ -631,6 +634,22 @@ pub fn quarantine_delete(batch_id: &str, qcfg: &QuarantineConfig) -> Result<u64>
 /// copy is kept and the conflict reported. The container is removed at the
 /// end (complete reversal; frames are verified redundant copies).
 pub fn undo_batch(batch_id: &str, qcfg: &QuarantineConfig) -> Result<UndoStats> {
+    undo_batch_with(batch_id, qcfg, false)
+}
+
+/// Undo with the ADV-N3 `--keep-container` option.
+///
+/// `keep_container = true` restores every quarantined file to its original
+/// path but **keeps** the `.coldstore` archive container on disk. Rationale:
+/// the container holds an independently verified copy of every restored
+/// file, so a user who is not yet sure they want the archive gone can undo
+/// the restore *and* keep the safety net. It is opt-in — the default
+/// (`undo_batch`) still removes the container, i.e. a complete reversal.
+pub fn undo_batch_with(
+    batch_id: &str,
+    qcfg: &QuarantineConfig,
+    keep_container: bool,
+) -> Result<UndoStats> {
     let path = qcfg.journal_dir.join(format!("{batch_id}.jsonl"));
     let lines = parse_journal(&path).with_context(|| format!("批次不存在: {batch_id}"))?;
     let state = progress_from_journal(&lines, &qcfg.root)?;
@@ -647,6 +666,7 @@ pub fn undo_batch(batch_id: &str, qcfg: &QuarantineConfig) -> Result<UndoStats> 
         conflicts: 0,
         conflict_files: Vec::new(),
         container_removed: false,
+        container_kept: String::new(),
     };
 
     for f in &state.files {
@@ -700,9 +720,14 @@ pub fn undo_batch(batch_id: &str, qcfg: &QuarantineConfig) -> Result<UndoStats> 
     }
 
     // container removal — complete reversal (frames are redundant copies)
+    // unless the caller asked to keep it (ADV-N3 `--keep-container`).
     if let Some(container) = state.container.clone() {
         let cpath = PathBuf::from(&container);
-        if cpath.exists() {
+        if keep_container {
+            if cpath.exists() {
+                stats.container_kept = cpath.display().to_string();
+            }
+        } else if cpath.exists() {
             fs::remove_file(&cpath)
                 .with_context(|| format!("移除归档容器失败: {}", cpath.display()))?;
             stats.container_removed = true;
@@ -719,6 +744,7 @@ pub fn undo_batch(batch_id: &str, qcfg: &QuarantineConfig) -> Result<UndoStats> 
         "restored": stats.restored,
         "conflicts": stats.conflicts,
         "container_removed": stats.container_removed,
+        "container_kept": stats.container_kept,
     }));
     jr.append(&done)?;
     Ok(stats)

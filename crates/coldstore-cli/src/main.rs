@@ -218,6 +218,9 @@ enum Cmd {
     /// 撤销一个批次（还原到原路径；隔离期内被改的文件不覆盖——ADV-N3）
     Undo {
         batch: String,
+        /// ADV-N3：保留归档容器（容器里是每个已还原文件的独立校验副本）
+        #[arg(long = "keep-container")]
+        keep_container: bool,
     },
     MarkCold {
         path: PathBuf,
@@ -427,7 +430,13 @@ fn run(cli: Cli) -> Result<()> {
                 cmd::quarantine::QuarantineCmd::Recover { batch, cont, abort }
             }
         }),
-        Cmd::Undo { batch } => cmd::undo::run(cmd::undo::UndoArgs { batch }),
+        Cmd::Undo {
+            batch,
+            keep_container,
+        } => cmd::undo::run(cmd::undo::UndoArgs {
+            batch,
+            keep_container,
+        }),
         Cmd::MarkCold { path } => cmd::mark::mark_cold(cmd::mark::MarkArgs { path }),
         Cmd::MarkHot { path } => cmd::mark::mark_hot(cmd::mark::MarkArgs { path }),
         Cmd::MarkClear { path } => cmd::mark::mark_clear(cmd::mark::MarkArgs { path }),

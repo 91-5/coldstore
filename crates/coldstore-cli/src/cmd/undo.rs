@@ -10,6 +10,10 @@ use coldstore_core::rules::toml::load_config;
 
 pub struct UndoArgs {
     pub batch: String,
+    /// ADV-N3: keep the archive container instead of removing it (the
+    /// container holds an independently verified copy of every restored
+    /// file — an extra safety net for a user who is not yet sure).
+    pub keep_container: bool,
 }
 
 pub fn run(args: UndoArgs) -> Result<()> {
@@ -23,16 +27,17 @@ pub fn run(args: UndoArgs) -> Result<()> {
         qcfg.journal_dir = std::path::absolute(j)?;
     }
 
-    let stats = quarantine::undo_batch(&args.batch, &qcfg)?;
+    let stats = quarantine::undo_batch_with(&args.batch, &qcfg, args.keep_container)?;
+    let container_note = if !stats.container_kept.is_empty() {
+        format!("已按 --keep-container 保留: {}", stats.container_kept)
+    } else if stats.container_removed {
+        "已移除".to_string()
+    } else {
+        "不存在/已清理".to_string()
+    };
     println!(
         "撤销批次 {}: 还原 {} 个文件到原路径（SHA-256 一致），隔离区对应项已清除，容器{}",
-        args.batch,
-        stats.restored,
-        if stats.container_removed {
-            "已移除"
-        } else {
-            "不存在/已清理"
-        }
+        args.batch, stats.restored, container_note
     );
     if stats.conflicts > 0 {
         bail!(

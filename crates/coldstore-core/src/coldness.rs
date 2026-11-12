@@ -101,6 +101,11 @@ impl MarkStore {
         self.marks.get(&normalize_key(path)).copied()
     }
 
+    /// All marks, sorted by key (deterministic).
+    pub fn entries(&self) -> Vec<(String, Mark)> {
+        self.marks.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    }
+
     pub fn len(&self) -> usize {
         self.marks.len()
     }
@@ -120,6 +125,9 @@ fn normalize_key(path: &Path) -> String {
 pub struct Classified {
     pub temperature: Temperature,
     pub reason: String,
+    /// Stable machine-readable reason key (so callers can group by *why*
+    /// without string-matching the human text, which embeds counts).
+    pub reason_key: &'static str,
 }
 
 /// Classify one file. `now` is injected for deterministic tests; call sites
@@ -136,12 +144,14 @@ pub fn classify(
             return Classified {
                 temperature: Temperature::Cold,
                 reason: "手动标记为 cold".to_string(),
+                reason_key: "manual_cold",
             };
         }
         Some(Mark::Hot) => {
             return Classified {
                 temperature: Temperature::Warm,
                 reason: "手动标记为 hot".to_string(),
+                reason_key: "manual_hot",
             };
         }
         None => {}
@@ -154,6 +164,7 @@ pub fn classify(
             reason: format!(
                 "位于可重建目录（{component}/）——删了能重建但重建慢；只标记与提示，绝不自动删"
             ),
+            reason_key: "rebuildable",
         };
     }
 
@@ -162,6 +173,7 @@ pub fn classify(
         return Classified {
             temperature: Temperature::Unknown,
             reason: "无有效 mtime".to_string(),
+            reason_key: "no_mtime",
         };
     };
     let age_days = match now.duration_since(modified) {
@@ -175,11 +187,13 @@ pub fn classify(
                 "超过 {age_days} 天未修改（mtime 主信号，阈值 {} 天）",
                 cfg.cold_after_days
             ),
+            reason_key: "mtime_old",
         }
     } else {
         Classified {
             temperature: Temperature::Warm,
             reason: format!("{age_days} 天内修改过（mtime 主信号）"),
+            reason_key: "mtime_recent",
         }
     }
 }
@@ -249,6 +263,149 @@ fn unrank(k: u8) -> Temperature {
         1 => Temperature::Warm,
         2 => Temperature::Rebuildable,
         _ => Temperature::Unknown,
+    }
+}
+
+/// Rebuild cost model for a known rebuildable directory kind.
+///
+/// **These are estimates, not measurements.** Each entry pairs a kind with
+/// the command that regenerates it and a *conservative* throughput used to
+/// turn "how many bytes would have to be regenerated" into "roughly how
+/// long that takes". The assumption is printed next to every estimate so
+/// nobody mistakes it for a measurement on this machine — the number is a
+/// planning aid, the decision stays with the user (hard rule 9: a
+/// REBUILDABLE directory is only ever *pointed out*, never deleted).
+const REBUILD_KINDS: &[(&str, u64, &str, &str)] = &[
+    (
+        "target",
+        3 * 1024 * 1024,
+        "cargo build",
+        "Rust 重编译，按 3 MiB/s 保守估计（实际随核数/缓存差异很大）",
+    ),
+    (
+        "node_modules",
+        20 * 1024 * 1024,
+        "npm install",
+        "解包为主、I/O 密集，按 20 MiB/s 估计",
+    ),
+    (
+        ".venv",
+        30 * 1024 * 1024,
+        "pip install -r requirements.txt",
+        "解包为主，按 30 MiB/s 估计",
+    ),
+    (
+        "venv",
+        30 * 1024 * 1024,
+        "pip install -r requirements.txt",
+        "解包为主，按 30 MiB/s 估计",
+    ),
+    (
+        "__pycache__",
+        50 * 1024 * 1024,
+        "python 重新生成字节码",
+        "纯本地重算，按 50 MiB/s 估计",
+    ),
+    (
+        ".cache",
+        50 * 1024 * 1024,
+        "工具自行重新下载/重算",
+        "视网络与工具而定，按 50 MiB/s 估计",
+    ),
+    (
+        "dist",
+        50 * 1024 * 1024,
+        "重新打包",
+        "视构建脚本而定，按 50 MiB/s 估计",
+    ),
+    (
+        "build",
+        50 * 1024 * 1024,
+        "重新构建",
+        "视构建脚本而定，按 50 MiB/s 估计",
+    ),
+];
+
+/// One rebuildable directory group, with the **rebuild cost** made visible
+/// (card D5: REBUILDABLE content may be regenerated, but it is slow to do
+/// so — the plan must show that cost, because deleting it is the user's
+/// decision, never the tool's).
+#[derive(Debug, Clone, Serialize)]
+pub struct RebuildableGroup {
+    /// Directory component that triggered the classification (`target`,
+    /// `node_modules`, …).
+    pub kind: String,
+    pub files: u64,
+    pub bytes: u64,
+    /// Command that regenerates the content.
+    pub rebuild_command: String,
+    /// **Estimated** seconds to regenerate `bytes` at the assumed rate.
+    pub rebuild_seconds_estimate: u64,
+    /// The assumption behind the estimate (printed verbatim to the user).
+    pub estimate_basis: String,
+    /// Always true — the product never deletes REBUILDABLE content.
+    pub auto_delete: bool,
+}
+
+/// Group the REBUILDABLE files of a scan by the rebuildable directory
+/// component and attach a rebuild-cost estimate to each group.
+///
+/// Deterministic: groups are returned sorted by kind, and the files
+/// counted are the ones the classifier actually labels REBUILDABLE.
+pub fn rebuildable_groups(
+    scan: &crate::scan::ScanResult,
+    marks: &MarkStore,
+    cfg: &ColdnessConfig,
+    now: SystemTime,
+) -> Vec<RebuildableGroup> {
+    let mut groups: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for f in &scan.files {
+        if classify(f, marks, cfg, now).temperature != Temperature::Rebuildable {
+            continue;
+        }
+        let Some(component) = rebuildable_component(&f.path, cfg) else {
+            continue;
+        };
+        let slot = groups.entry(component).or_insert((0, 0));
+        slot.0 += 1;
+        slot.1 += f.size;
+    }
+
+    groups
+        .into_iter()
+        .map(|(kind, (files, bytes))| {
+            let spec = REBUILD_KINDS
+                .iter()
+                .find(|(k, _, _, _)| k.eq_ignore_ascii_case(&kind));
+            let (throughput, command, basis) = match spec {
+                Some((_, t, c, b)) => (*t, *c, *b),
+                None => (
+                    20 * 1024 * 1024,
+                    "（按项目自身的构建命令重新生成）",
+                    "未知目录类型，按 20 MiB/s 保守估计",
+                ),
+            };
+            RebuildableGroup {
+                kind,
+                files,
+                bytes,
+                rebuild_command: command.to_string(),
+                rebuild_seconds_estimate: bytes / throughput.max(1),
+                estimate_basis: basis.to_string(),
+                auto_delete: false,
+            }
+        })
+        .collect()
+}
+
+/// Human-friendly duration for an estimate (seconds → "约 3 分 20 秒").
+pub fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("约 {seconds} 秒")
+    } else if seconds < 3600 {
+        format!("约 {} 分 {} 秒", seconds / 60, seconds % 60)
+    } else {
+        format!("约 {} 小时 {} 分", seconds / 3600, (seconds % 3600) / 60)
     }
 }
 

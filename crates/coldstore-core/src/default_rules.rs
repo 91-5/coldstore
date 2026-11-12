@@ -50,4 +50,48 @@ priority = 5
 match_ext = ["jpg", "png", "mp4", "mp3", "pdf", "zip", "7z"]
 action = "skip"
 enabled = false
+
+# ── 中文 Windows 生态规则包（card D6 尾项）────────────────────────────
+# 目标：通用磁盘分析工具认不出、但确实占地方的目录与文件。
+# 动作一律是 skip —— 本工具**只识别 + 建议**，绝不代替用户清理这些内容。
+# 识别路径而非读取软件内容：只按路径模式与文件名模式匹配。
+
+[[rule]]
+name = "im-cache"
+priority = 20
+match_path = [
+  "**/WeChat Files/**",
+  "**/xwechat_files/**",
+  "**/Tencent Files/**",
+  "**/QQ/**",
+  "**/WeChat/**/Msg/**",
+  "**/WeChat/**/FileStorage/**",
+]
+note = "微信/QQ 的聊天附件与图片缓存：可手动清理，工具不代劳（动作=skip，只识别+建议）"
+action = "skip"
+enabled = false
+
+[[rule]]
+name = "game-platform-cache"
+priority = 20
+match_path = [
+  "**/steamapps/**/shadercache/**",
+  "**/steamapps/**/downloading/**",
+  "**/Steam/**/appcache/**",
+  "**/Tencent Games/**/Cache/**",
+  "**/WeGame/**/Cache/**",
+  "**/Epic Games Launcher/**/Data/**",
+]
+note = "Steam / WeGame / Epic 的平台缓存与下载残留：平台自身会清理，工具只识别+建议（动作=skip）"
+action = "skip"
+enabled = false
+
+[[rule]]
+name = "netdisk-conflict"
+priority = 20
+match_path = ["**/* - 冲突/**", "**/* - 冲突.*"]
+match_ext = ["tmp", "tmp1", "!ut", "conflict"]
+note = "网盘同步冲突副本与临时文件：确认无用后可自行删除，工具只识别+建议（动作=skip）"
+action = "skip"
+enabled = false
 "#;

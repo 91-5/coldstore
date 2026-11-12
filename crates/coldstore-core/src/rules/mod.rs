@@ -73,6 +73,11 @@ pub struct Rule {
     /// Defaults to true when omitted; the *shipped defaults* are all false.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Human-readable note shown next to the rule (card D6: the built-in
+    /// Chinese-ecosystem rules only *recognise* and *advise* — the note is
+    /// where the advice lives). `None` = no note.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// A rule with its globs pre-compiled.
@@ -194,6 +199,9 @@ pub struct RuleHit {
     /// How many of these the predictor would veto (measured SKIP class) —
     /// the rule narrows candidates, the predictor decides (card D1).
     pub predictor_vetoed: u64,
+    /// The rule's own note (the built-in Chinese-ecosystem rules carry the
+    /// advice here).
+    pub note: Option<String>,
     /// Up to 3 example paths, sorted (deterministic, B19).
     pub example_paths: Vec<String>,
 }
@@ -221,6 +229,7 @@ pub fn evaluate_all(
             files: 0,
             bytes: 0,
             predictor_vetoed: 0,
+            note: cr.rule.note.clone(),
             example_paths: Vec::new(),
         });
         slot.files += 1;
@@ -274,6 +283,7 @@ mod tests {
             min_size_mb: None,
             action,
             enabled: true,
+            note: None,
         }
     }
 

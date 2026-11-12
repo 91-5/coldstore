@@ -6,6 +6,24 @@ on:
   pull_request:
 
 jobs:
+  # P2 review B1 regression guard: a bare .gitignore rule once silently
+  # excluded core sources, so the commit compiled locally but a clean
+  # checkout did not. Verify tracked files include the core modules
+  # before running anything else.
+  tracked-sources:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Core sources must be tracked (not gitignore-shadowed)
+        run: |
+          $missing = @()
+          foreach ($f in @('crates/coldstore-core/src/quarantine/mod.rs','crates/coldstore-core/src/quarantine/journal.rs')) {
+            git ls-files --error-unmatch $f 2>$null
+            if ($LASTEXITCODE -ne 0) { $missing += $f }
+          }
+          if ($missing.Count -gt 0) { throw "gitignore-shadowed core sources: $($missing -join ', ')" }
+          Write-Output 'OK: all core sources tracked'
+
   fmt:
     runs-on: windows-latest
     steps:

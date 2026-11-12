@@ -568,17 +568,65 @@ pub fn quarantine_list(qcfg: &QuarantineConfig) -> Result<Vec<BatchInfo>> {
     Ok(out)
 }
 
-/// (created date, expiry date, expired?) — concrete UTC dates (ADV-N5).
+/// Local UTC offset in seconds (east positive, e.g. +28800 for UTC+8).
+/// Windows: `GetTimeZoneInformation`. Non-Windows / failure: None → caller
+/// falls back to UTC (no panic; P2-B1 C1). NOTE: current offset only — for a
+/// historical created_millis across a DST transition this is approximate
+/// (display-only; hard-constraint 3 still guarantees no auto-delete).
+fn local_offset_seconds() -> Option<i64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+        // SAFETY: tz is a plain out-struct; the call writes at most
+        // size_of::<TIME_ZONE_INFORMATION>() bytes and has no other side effects.
+        let mut tz: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+        // TIME_ZONE_ID_* are u32 constants; casts below are value-transparent.
+        #[expect(non_snake_case)]
+        let TIME_ZONE_ID_INVALID = 0xFFFFFFFFu32;
+        let id = unsafe { GetTimeZoneInformation(&mut tz) } as u32;
+        if id == TIME_ZONE_ID_INVALID {
+            return None;
+        }
+        // Bias is UTC-minus-local, in minutes (east of UTC => negative).
+        Some(-i64::from(tz.Bias) * 60)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// (created date, expiry date, expired?) — concrete **local** calendar dates
+/// (ADV-N5 + P2-B1 C1). Computed on the machine's local time zone (UTC offset
+/// applied to the UTC epoch) so the shown "expires YYYY-MM-DD" and the `expired`
+/// badge match what a UTC+8 user expects, instead of drifting a day at the
+/// local-midnight boundary. Falls back to UTC if the local tz cannot be
+/// resolved (no panic; byte-identical to the old behavior on tz-less machines).
 fn retention_dates(created_millis: u64, retention_days: u64) -> (String, String, bool) {
-    let days = (created_millis / 86_400_000) as i64;
-    let (y, m, d) = civil_from_days(days);
-    let exp_days = days + retention_days as i64;
-    let (ey, em, ed) = civil_from_days(exp_days);
-    let today = (now_millis() / 86_400_000) as i64;
+    let off_seconds = local_offset_seconds().unwrap_or(0);
+    retention_dates_offset(created_millis, retention_days, off_seconds)
+}
+
+/// Pure, offset-parameterized variant — deterministic & unit-testable across
+/// time zones. `offset` is the local offset in seconds (east positive, e.g.
+/// +28800 for UTC+8); it is added to the UTC epoch before the civil-day
+/// conversion.
+fn retention_dates_offset(
+    created_millis: u64,
+    retention_days: u64,
+    offset_seconds: i64,
+) -> (String, String, bool) {
+    let off_ms = offset_seconds * 1_000;
+    // Local calendar day = floor((utc_epoch_millis + local_offset_ms) / 86400s).
+    let created_day = (created_millis as i64 + off_ms) / 86_400_000;
+    let (y, m, d) = civil_from_days(created_day);
+    let exp_day = created_day + retention_days as i64;
+    let (ey, em, ed) = civil_from_days(exp_day);
+    let today_day = (now_millis() as i64 + off_ms) / 86_400_000;
     (
         format!("{y:04}-{m:02}-{d:02}"),
         format!("{ey:04}-{em:02}-{ed:02}"),
-        today >= exp_days,
+        today_day >= exp_day,
     )
 }
 
@@ -1175,6 +1223,33 @@ mod tests {
         );
 
         fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn retention_dates_local_offset_shifts_boundary_day() {
+        // 23:30:00 UTC within day-number 20_000 (84_600_000 ms into the day).
+        let created = 20_000u64 * 86_400_000 + 84_600_000u64;
+        // UTC (offset 0): created day stays 20_000, expiry = +7 = 20_007.
+        let (c, e, _) = retention_dates_offset(created, 7, 0);
+        let (cy, cm, cd) = civil_from_days(20_000);
+        let (ey, em, ed) = civil_from_days(20_007);
+        assert_eq!(c, format!("{cy:04}-{cm:02}-{cd:02}"), "UTC created day");
+        assert_eq!(e, format!("{ey:04}-{em:02}-{ed:02}"), "UTC expiry day");
+        // UTC+8 (offset 28800s): 23:30 UTC is 07:30 the NEXT local day
+        // -> created 20_001, expiry 20_008.
+        let (c8, e8, _) = retention_dates_offset(created, 7, 28_800);
+        let (cy8, cm8, cd8) = civil_from_days(20_001);
+        let (ey8, em8, ed8) = civil_from_days(20_008);
+        assert_eq!(
+            c8,
+            format!("{cy8:04}-{cm8:02}-{cd8:02}"),
+            "UTC+8 created day rolls +1"
+        );
+        assert_eq!(
+            e8,
+            format!("{ey8:04}-{em8:02}-{ed8:02}"),
+            "UTC+8 expiry = created+7"
+        );
     }
 
     #[test]

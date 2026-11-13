@@ -1,23 +1,22 @@
 //! ColdStore CLI front-end.
 //!
-//! Hard rule (card OC-20261110-001 §6.1): scan / predict are read-only and
-//! never write to disk; error output always carries path + reason.
+//! Read-only semantics (ADV-N4): every command defaults to read-only;
+//! `--execute` (introduced with the execution commands) is the *only*
+//! write switch. Error output always carries path + reason.
 
-use std::collections::BTreeMap;
+mod cmd;
+mod ctrlc;
+
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use coldstore_core::predict::{self, format_bytes, PredictionReport, Verdict};
-use coldstore_core::scan::{self, ScanResult};
-use coldstore_core::{archive, dedupe};
-
 #[derive(Parser)]
 #[command(
     name = "coldstore",
     version,
-    about = "ColdStore 引擎 CLI —— 默认只读，绝不删除用户文件"
+    about = "ColdStore CLI —— 默认只读；--execute 是唯一写盘开关（ADV-N4）"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -49,10 +48,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// 去重识别：大小分桶 + SHA-256，只出计划、绝不执行（执行属 002 执行层）
+    /// 去重识别：大小分桶 + SHA-256，只出计划、绝不执行（执行属执行层）
     Dedupe {
         path: PathBuf,
-        /// 兼容卡片 CLI 形态；001 的 dedupe 本就永远 plan-only
+        /// 兼容 CLI 形态；dedupe 本就永远 plan-only
         #[arg(long)]
         plan_only: bool,
         /// 入桶最小体积（KB，默认 4）
@@ -96,6 +95,9 @@ enum Cmd {
         /// 还原到记录的原路径（跨卷将被拒绝——AV-5）
         #[arg(long)]
         to_original: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
     },
     /// 列出容器内容（索引 fail-closed）
     List {
@@ -110,6 +112,248 @@ enum Cmd {
         /// 并行校验线程数（默认 = 全局线程池）
         #[arg(long)]
         threads: Option<usize>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 规则引擎：list / enable / disable / test
+    Rule {
+        #[command(subcommand)]
+        cmd: RuleCmd,
+    },
+    /// NTFS 透明压缩：启用（默认 dry-run；--execute 才写盘——ADV-N4）
+    Compress {
+        /// 目标目录
+        path: PathBuf,
+        /// 真正执行（唯一写盘开关）
+        #[arg(long)]
+        execute: bool,
+        /// ADV-N7 二次确认（批次超阈值时必需）
+        #[arg(long)]
+        yes: bool,
+        /// 并发工作线程数（默认 4）
+        #[arg(long)]
+        threads: Option<usize>,
+        /// 限速（MiB/s；默认不限）
+        #[arg(long = "rate-limit", value_name = "MIB_S")]
+        rate_limit: Option<u64>,
+        /// 覆盖执行器级格式跳过（系统目录排除永远不可覆盖）
+        #[arg(long)]
+        force: bool,
+        /// 最小体积（KB，0=不限）
+        #[arg(long = "min-size-kb", default_value_t = 0)]
+        min_size_kb: u64,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 解除 NTFS 透明压缩（可逆：COMPRESSION_FORMAT_NONE）
+    Decompress {
+        /// 目标目录
+        path: PathBuf,
+        /// 真正执行（唯一写盘开关）
+        #[arg(long)]
+        execute: bool,
+        /// ADV-N7 二次确认（批次超阈值时必需）
+        #[arg(long)]
+        yes: bool,
+        /// 并发工作线程数（默认 4）
+        #[arg(long)]
+        threads: Option<usize>,
+        /// 限速（MiB/s；默认不限）
+        #[arg(long = "rate-limit", value_name = "MIB_S")]
+        rate_limit: Option<u64>,
+        /// 覆盖执行器级格式跳过（系统目录排除永远不可覆盖）
+        #[arg(long)]
+        force: bool,
+        /// 最小体积（KB，0=不限）
+        #[arg(long = "min-size-kb", default_value_t = 0)]
+        min_size_kb: u64,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 一屏规划：占用归因 + 规则命中 + 预计节省 + 冷热分布（只读）
+    Plan {
+        path: PathBuf,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON（逐字节可复现）
+        #[arg(long)]
+        json: bool,
+    },
+    /// 手动标记为冷（持久化，重启仍生效）
+    /// 执行规则（默认 dry-run！--execute 才写盘——ADV-N4；ADV-N7 超阈需 --yes）
+    Run {
+        /// 扫描根目录
+        path: PathBuf,
+        /// 规则名
+        #[arg(long)]
+        rule: String,
+        /// 真正执行（唯一写盘开关）
+        #[arg(long)]
+        execute: bool,
+        /// ADV-N7 二次确认（命中量超阈值时必需）
+        #[arg(long)]
+        yes: bool,
+        /// 归档容器路径（默认 %USERPROFILE%\.coldstorerchive\）
+        #[arg(long)]
+        container: Option<PathBuf>,
+        /// 配置目录覆盖
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+        /// 隔离区根目录覆盖
+        #[arg(long = "quarantine-root")]
+        quarantine_root: Option<PathBuf>,
+        /// journal 目录覆盖
+        #[arg(long = "journal-dir")]
+        journal_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 隔离区：list / restore / delete（需 --confirm）/ recover（--continue|--abort）
+    Quarantine {
+        #[command(subcommand)]
+        cmd: QuarantineCmd,
+    },
+    /// 撤销一个批次（还原到原路径；隔离期内被改的文件不覆盖——ADV-N3）
+    Undo {
+        batch: String,
+        /// ADV-N3：保留归档容器（容器里是每个已还原文件的独立校验副本）
+        #[arg(long = "keep-container")]
+        keep_container: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 手动标记为冷（持久化，重启仍生效）
+    MarkCold {
+        path: PathBuf,
+        /// 配置目录覆盖（标记与配置同目录）
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 手动标记为热（持久化，重启仍生效）
+    MarkHot {
+        path: PathBuf,
+        /// 配置目录覆盖（标记与配置同目录）
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 清除手动标记
+    MarkClear {
+        path: PathBuf,
+        /// 配置目录覆盖（标记与配置同目录）
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 交互式终端界面：扫描 → 分析 → 勾选 → 执行（card D6）
+    Tui {
+        /// 扫描根目录
+        path: PathBuf,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+        /// 渲染一帧到标准输出后退出（无 TTY 环境下可脚本化冒烟）
+        #[arg(long = "render-once")]
+        render_once: bool,
+        /// 渲染一帧后模拟按下 q 退出（冒烟测试用）
+        #[arg(long = "smoke")]
+        smoke: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RuleCmd {
+    /// 列出规则表
+    List {
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+    },
+    /// 启用一条规则（写配置文件）
+    Enable {
+        name: String,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+    },
+    /// 停用一条规则（写配置文件）
+    Disable {
+        name: String,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+        /// 配置目录覆盖
+        #[arg(long = "config-dir")]
+        config_dir: Option<PathBuf>,
+    },
+    /// 试算：每条规则会命中什么（只展示，不执行——B16）
+    Test {
+        path: PathBuf,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum QuarantineCmd {
+    /// 列出批次（批次/来源/占用/保留期到期日——B11）
+    List {
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 取回批次（文件回到原路径；默认保留归档容器作为安全网）
+    Restore {
+        batch: String,
+        /// 同时移除归档容器（= 完整回滚，与 undo 默认行为一致）
+        #[arg(long = "remove-container")]
+        remove_container: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 立即释放（真删；硬约束 3：必须 --confirm）
+    Delete {
+        batch: String,
+        #[arg(long)]
+        confirm: bool,
+        /// 输出完整 JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// 恢复中断批次（B13）：--continue 续跑 / --abort 回滚
+    Recover {
+        batch: String,
+        #[arg(long = "continue")]
+        cont: bool,
+        #[arg(long)]
+        abort: bool,
         /// 输出完整 JSON
         #[arg(long)]
         json: bool,
@@ -130,65 +374,35 @@ fn run(cli: Cli) -> Result<()> {
             path,
             json,
             follow_junction,
-        } => {
-            let opts = scan::ScanOptions {
-                follow_junction,
-                ..Default::default()
-            };
-            let res = scan::scan(&path, &opts)?;
-            if json {
-                println!("{}", serde_json::to_string(&res)?);
-            } else {
-                print_scan(&res);
-            }
-            Ok(())
-        }
+        } => cmd::scan::run(cmd::scan::ScanArgs {
+            path,
+            json,
+            follow_junction,
+        }),
         Cmd::Predict {
             path,
             sample,
             min_candidate_kb,
             json,
-        } => {
-            let scan_res = scan::scan(&path, &Default::default())?;
-            let mut opts = predict::PredictOptions::default();
-            if let Some(s) = sample {
-                opts.per_class_sample_budget = s;
-            }
-            opts.min_candidate_bytes = min_candidate_kb * 1024;
-            let report = predict::predict(&scan_res, &opts)?;
-            if json {
-                println!("{}", serde_json::to_string(&report)?);
-            } else {
-                print_predict(&report);
-            }
-            Ok(())
-        }
+        } => cmd::predict::run(cmd::predict::PredictArgs {
+            path,
+            sample,
+            min_candidate_kb,
+            json,
+        }),
         Cmd::Dedupe {
             path,
             plan_only,
             min_size_kb,
             keep,
             json,
-        } => {
-            let _ = plan_only; // 001 的 dedupe 只出计划，永远 plan-only
-            let scan_res = scan::scan(&path, &Default::default())?;
-            let policy = match keep.as_deref() {
-                None | Some("oldest") => dedupe::KeepPolicy::Oldest,
-                Some("newest") => dedupe::KeepPolicy::Newest,
-                Some(p) => dedupe::KeepPolicy::KeepPath(PathBuf::from(p)),
-            };
-            let opts = dedupe::DedupeOptions {
-                min_size: min_size_kb * 1024,
-                policy,
-            };
-            let plan = dedupe::dedupe(&scan_res, &opts)?;
-            if json {
-                println!("{}", serde_json::to_string(&plan)?);
-            } else {
-                print_dedupe(&plan);
-            }
-            Ok(())
-        }
+        } => cmd::dedupe::run(cmd::dedupe::DedupeArgs {
+            path,
+            plan_only,
+            min_size_kb,
+            keep,
+            json,
+        }),
         Cmd::Archive {
             path,
             output,
@@ -196,335 +410,211 @@ fn run(cli: Cli) -> Result<()> {
             min_size_kb,
             sidecar,
             json,
-        } => {
-            let scan_res = scan::scan(&path, &Default::default())?;
-            let include: Vec<String> = include_ext
-                .iter()
-                .map(|s| s.trim().to_lowercase())
-                .collect();
-            let out_lower = output.to_string_lossy().to_lowercase();
-            let tmp_lower = format!("{out_lower}.tmp");
-            let excluded_self = scan_res
-                .files
-                .iter()
-                .filter(|f| {
-                    let p = f.path.to_string_lossy().to_lowercase();
-                    p == out_lower || p == tmp_lower || p.starts_with(&format!("{out_lower}."))
-                })
-                .count();
-            if excluded_self > 0 {
-                eprintln!("⚠ 已排除 {excluded_self} 个与容器自身重名的文件");
-            }
-            let picked: Vec<&coldstore_core::scan::FileEntry> = scan_res
-                .files
-                .iter()
-                .filter(|f| {
-                    let p = f.path.to_string_lossy().to_lowercase();
-                    if p == out_lower || p == tmp_lower || p.starts_with(&format!("{out_lower}.")) {
-                        return false;
-                    }
-                    if !include.is_empty() && !include.contains(&f.ext) {
-                        return false;
-                    }
-                    f.size >= min_size_kb * 1024
-                })
-                .collect();
-            let picked: Vec<coldstore_core::scan::FileEntry> =
-                picked.into_iter().cloned().collect();
-            let opts = archive::ArchiveOptions {
-                sidecar,
-                ..Default::default()
-            };
-            let stats = archive::archive(&picked, &output, &opts)?;
-            if json {
-                println!("{}", serde_json::to_string(&stats)?);
-            } else {
-                print_archive(&stats);
-            }
-            Ok(())
-        }
+        } => cmd::archive::run(cmd::archive::ArchiveArgs {
+            path,
+            output,
+            include_ext,
+            min_size_kb,
+            sidecar,
+            json,
+        }),
         Cmd::Extract {
             container,
             key,
             dest,
             to_original,
-        } => {
-            let parsed = if key.chars().all(|c| c.is_ascii_digit()) {
-                archive::EntryKey::Ordinal(key.parse::<u64>()?)
-            } else {
-                archive::EntryKey::Path(key)
-            };
-            let outcome = match dest {
-                Some(d) => archive::retrieve(&container, &parsed, &d)?,
-                None if to_original => archive::retrieve_to_original(&container, &parsed)?,
-                None => anyhow::bail!(
-                    "必须提供 -d/--dest 或 --to-original（拒绝把取回目标猜到默认位置）"
-                ),
-            };
-            println!(
-                "取回完成: 条目 {} ← {} → {}（{} 字节，压缩 {} 字节，SHA-256 {}，耗时 {} ms）",
-                outcome.ordinal,
-                outcome.source_path,
-                outcome.dest,
-                outcome.size,
-                outcome.compressed_size,
-                if outcome.sha_verified {
-                    "已校验一致"
-                } else {
-                    "UNVERIFIED（无哈希）"
-                },
-                outcome.elapsed_ms
-            );
-            Ok(())
-        }
-        Cmd::List { container, json } => {
-            let (_file, header, idx) = archive::open_container(&container)?;
-            if json {
-                println!("{}", serde_json::to_string(&(&header, &idx))?);
-            } else {
-                print_list(&header, &idx);
-            }
-            Ok(())
-        }
+            json,
+        } => cmd::extract::run(cmd::extract::ExtractArgs {
+            container,
+            key,
+            dest,
+            to_original,
+            json,
+        }),
+        Cmd::List { container, json } => cmd::list::run(cmd::list::ListArgs { container, json }),
         Cmd::Verify {
             container,
             threads,
             json,
-        } => {
-            let opts = archive::VerifyOptions { threads };
-            let stats = archive::verify_with(&container, &opts)?;
-            if json {
-                println!("{}", serde_json::to_string(&stats)?);
-            } else {
-                print_verify(&stats);
-            }
-            std::process::exit(if stats.ok { 0 } else { 1 });
-        }
-    }
-}
-
-fn print_archive(stats: &archive::ArchiveStats) {
-    println!(
-        "归档完成: {}（索引模式 {}）",
-        stats.container, stats.index_mode
-    );
-    println!(
-        "  帧数 {}   原始 {} → 压缩 {}（占比 {:.1}%）   容器 {}   最长窗口 {}   耗时 {} ms",
-        stats.frame_count,
-        format_bytes(stats.total_original),
-        format_bytes(stats.total_compressed),
-        if stats.total_original > 0 {
-            stats.total_compressed as f64 / stats.total_original as f64 * 100.0
-        } else {
-            0.0
-        },
-        format_bytes(stats.container_size),
-        stats.max_window_log,
-        stats.duration_ms
-    );
-    println!("  源文件未移动、未删除（可逆执行属 002 执行层）");
-    if stats.sidecar_written {
-        println!("  sidecar .idx 已写入（派生缓存；内嵌索引仍为唯一事实源）");
-    }
-}
-
-fn print_list(header: &archive::ContainerHeader, idx: &archive::ArchiveIndex) {
-    println!(
-        "容器 {} 帧共 {} 个（{}），索引条目 {} 条:",
-        header.frame_count,
-        header.frame_count,
-        if header.index_embedded {
-            "内嵌索引权威"
-        } else {
-            "sidecar 权威"
-        },
-        idx.entries.len()
-    );
-    println!(
-        "  {:>4}  {:>10}  {:>10}  {:>12}  {:<14}  路径",
-        "#", "原始", "压缩", "offset", "sha256[:12]"
-    );
-    for e in &idx.entries {
-        println!(
-            "  {:>4}  {:>10}  {:>10}  {:>12}  {:<14}  {}",
-            e.ordinal,
-            format_bytes(e.size),
-            format_bytes(e.compressed_size),
-            e.offset,
-            e.sha256_hex
-                .as_deref()
-                .unwrap_or("UNVERIFIED")
-                .get(..12)
-                .unwrap_or(""),
-            e.path
-        );
-    }
-}
-
-fn print_verify(stats: &archive::VerifyStats) {
-    println!(
-        "校验完成: {}   帧数 {}   已检 {} 条   原始 {} / 压缩 {}",
-        stats.container,
-        stats.frame_count,
-        stats.entries_checked,
-        format_bytes(stats.total_original),
-        format_bytes(stats.total_compressed)
-    );
-    println!(
-        "  SHA-256 失败 {}   体积不符 {}   UNVERIFIED {}   结论: {}   耗时 {} ms",
-        stats.sha_failures,
-        stats.size_failures,
-        stats.unverified_entries,
-        if stats.ok {
-            "全部通过 ✓"
-        } else {
-            "存在失败 ✗"
-        },
-        stats.duration_ms
-    );
-    for f in &stats.failures {
-        println!("    - {f}");
-    }
-}
-
-fn print_dedupe(plan: &dedupe::DedupePlan) {
-    println!(
-        "去重计划（仅识别，不执行 —— 硬链接替换属 002 执行层）: 策略 {}，阈值 ≥ {}",
-        plan.policy,
-        format_bytes(plan.min_size)
-    );
-    println!(
-        "  扫描 {} 个文件，入桶 {}，哈希成功 {}（失败 {}），重复组 {} 个",
-        plan.scanned_files,
-        plan.bucketed_files,
-        plan.hashed_files,
-        plan.hash_failures,
-        plan.groups.len()
-    );
-    println!(
-        "  预计可回收: {}   （已完全硬链接的组: {} 个——AV-N1，节省 0MB）",
-        format_bytes(plan.total_reclaimable_bytes),
-        plan.fully_hardlinked_groups
-    );
-    for (n, g) in plan.groups.iter().enumerate() {
-        println!(
-            "  [组 {}] sha256={}… 体积 {}  保留: {}（mtime {}）",
-            n + 1,
-            &g.sha256_hex[..16.min(g.sha256_hex.len())],
-            format_bytes(g.size),
-            g.keep.path.display(),
-            fmt_time(g.keep.modified)
-        );
-        for d in &g.duplicates {
-            let mark = if d.same_data_as_keep {
-                "已硬链接（同一份数据，节省 0MB）"
-            } else {
-                "独立副本（可回收）"
-            };
-            println!("      副本: {} — {}", d.path.display(), mark);
-        }
-    }
-}
-
-/// Human-readable mtime for plan output (epoch seconds; "未知" when absent).
-fn fmt_time(t: Option<std::time::SystemTime>) -> String {
-    match t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) {
-        Some(d) => format!("{} s", d.as_secs()),
-        None => "未知".to_string(),
-    }
-}
-
-fn print_scan(res: &ScanResult) {
-    println!("扫描完成: {}", res.root.display());
-    println!(
-        "  文件数: {}   总体积: {}   耗时: {} ms",
-        res.files.len(),
-        format_bytes(res.total_bytes),
-        res.duration_ms
-    );
-    if res.truncated_by_reparse_cap {
-        println!("  ⚠ 重解析点上限已触发，部分子树被拒绝进入（见 skipped）");
-    }
-
-    println!("  目录占用 Top（深度 1）:");
-    for d in res.dir_rollup().iter().take(10) {
-        println!(
-            "    {:<24} {:>6} 个文件  {:>10}",
-            d.name,
-            d.files,
-            format_bytes(d.bytes)
-        );
-    }
-
-    println!("  扩展名 Top:");
-    for d in res.ext_rollup().iter().take(10) {
-        println!(
-            "    {:<24} {:>6} 个文件  {:>10}",
-            d.name,
-            d.files,
-            format_bytes(d.bytes)
-        );
-    }
-
-    // Skip audit trail: grouped by reason, with examples.
-    println!("  跳过项: {} 个（原因分布）:", res.skipped.len());
-    let mut grouped: BTreeMap<String, usize> = BTreeMap::new();
-    for s in &res.skipped {
-        *grouped.entry(s.reason.to_string()).or_default() += 1;
-    }
-    for (reason, n) in &grouped {
-        println!("    [{n:>5}] {reason}");
-    }
-    let shown = res.skipped.len().min(10);
-    if shown > 0 {
-        println!("  跳过项示例（前 {shown} 条）:");
-        for s in res.skipped.iter().take(shown) {
-            println!("    {} — {}", s.path.display(), s.reason);
-        }
-    }
-}
-
-fn print_predict(report: &PredictionReport) {
-    let s = &report.summary;
-    println!(
-        "收益预测（策略 {}，zstd {}）: {}",
-        report.policy_version, report.zstd_version, report.root
-    );
-    println!(
-        "  扫描: {} 个文件 / {}   类别: {} 个",
-        report.scanned_files,
-        format_bytes(report.scanned_bytes),
-        report.classes.len()
-    );
-    println!(
-        "  预计可省: {} – {}（仅 ARCHIVE 类累计，基于实测压缩比）",
-        format_bytes(s.est_savings_low),
-        format_bytes(s.est_savings_high)
-    );
-    println!(
-        "  判定分布: ARCHIVE {} / SKIP {} / UNSURE {} / DELETABLE {}",
-        s.archive_classes, s.skip_classes, s.unsure_classes, s.deletable_classes
-    );
-    println!();
-    for c in &report.classes {
-        let verdict = match c.verdict {
-            Verdict::Deletable => "DELETABLE",
-            Verdict::Archive => "ARCHIVE",
-            Verdict::Skip => "SKIP",
-            Verdict::Unsure => "UNSURE",
-        };
-        println!(
-            "  [{verdict}] {} — 文件 {} / 体积 {} / 样本 {}{}",
-            c.ext,
-            c.total_files,
-            format_bytes(c.total_bytes),
-            c.sample_count,
-            if c.failed_samples > 0 {
-                format!("（{} 个样本读取失败）", c.failed_samples)
-            } else {
-                String::new()
-            }
-        );
-        println!("      理由: {}", c.reason);
+        } => cmd::verify::run(cmd::verify::VerifyArgs {
+            container,
+            threads,
+            json,
+        }),
+        Cmd::Rule { cmd } => cmd::rule::run(match cmd {
+            RuleCmd::List { json, config_dir } => cmd::rule::RuleCmd::List { json, config_dir },
+            RuleCmd::Enable {
+                name,
+                json,
+                config_dir,
+            } => cmd::rule::RuleCmd::Enable {
+                name,
+                json,
+                config_dir,
+            },
+            RuleCmd::Disable {
+                name,
+                json,
+                config_dir,
+            } => cmd::rule::RuleCmd::Disable {
+                name,
+                json,
+                config_dir,
+            },
+            RuleCmd::Test { path, json } => cmd::rule::RuleCmd::Test { path, json },
+        }),
+        Cmd::Compress {
+            path,
+            execute,
+            yes,
+            threads,
+            rate_limit,
+            force,
+            min_size_kb,
+            config_dir,
+            json,
+        } => cmd::compress::run(cmd::compress::CompressArgs {
+            path,
+            mode: coldstore_core::ntfs::CompressionMode::Enable,
+            execute,
+            yes,
+            threads,
+            rate_limit,
+            force,
+            min_size_kb,
+            config_dir,
+            json,
+        }),
+        Cmd::Decompress {
+            path,
+            execute,
+            yes,
+            threads,
+            rate_limit,
+            force,
+            min_size_kb,
+            config_dir,
+            json,
+        } => cmd::compress::run(cmd::compress::CompressArgs {
+            path,
+            mode: coldstore_core::ntfs::CompressionMode::Disable,
+            execute,
+            yes,
+            threads,
+            rate_limit,
+            force,
+            min_size_kb,
+            config_dir,
+            json,
+        }),
+        Cmd::Plan {
+            path,
+            config_dir,
+            json,
+        } => cmd::plan::run(cmd::plan::PlanArgs {
+            path,
+            json,
+            config_dir,
+        }),
+        Cmd::Run {
+            path,
+            rule,
+            execute,
+            yes,
+            container,
+            config_dir,
+            quarantine_root,
+            journal_dir,
+            json,
+        } => cmd::run::run(cmd::run::RunArgs {
+            path,
+            rule,
+            execute,
+            yes,
+            container,
+            config_dir,
+            quarantine_root,
+            journal_dir,
+            json,
+        }),
+        Cmd::Quarantine { cmd } => cmd::quarantine::run(match cmd {
+            QuarantineCmd::List { json } => cmd::quarantine::QuarantineCmd::List { json },
+            QuarantineCmd::Restore {
+                batch,
+                remove_container,
+                json,
+            } => cmd::quarantine::QuarantineCmd::Restore {
+                batch,
+                keep_container: !remove_container,
+                json,
+            },
+            QuarantineCmd::Delete {
+                batch,
+                confirm,
+                json,
+            } => cmd::quarantine::QuarantineCmd::Delete {
+                batch,
+                confirm,
+                json,
+            },
+            QuarantineCmd::Recover {
+                batch,
+                cont,
+                abort,
+                json,
+            } => cmd::quarantine::QuarantineCmd::Recover {
+                batch,
+                cont,
+                abort,
+                json,
+            },
+        }),
+        Cmd::Undo {
+            batch,
+            keep_container,
+            json,
+        } => cmd::undo::run(cmd::undo::UndoArgs {
+            batch,
+            keep_container,
+            json,
+        }),
+        Cmd::MarkCold {
+            path,
+            config_dir,
+            json,
+        } => cmd::mark::mark_cold(cmd::mark::MarkArgs {
+            path,
+            json,
+            config_dir,
+        }),
+        Cmd::MarkHot {
+            path,
+            config_dir,
+            json,
+        } => cmd::mark::mark_hot(cmd::mark::MarkArgs {
+            path,
+            json,
+            config_dir,
+        }),
+        Cmd::MarkClear {
+            path,
+            config_dir,
+            json,
+        } => cmd::mark::mark_clear(cmd::mark::MarkArgs {
+            path,
+            json,
+            config_dir,
+        }),
+        Cmd::Tui {
+            path,
+            config_dir,
+            render_once,
+            smoke,
+        } => cmd::tui::run(cmd::tui::TuiArgs {
+            path,
+            config_dir,
+            render_once,
+            smoke,
+        }),
     }
 }

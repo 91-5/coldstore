@@ -29,6 +29,7 @@ pub use index::{
     open_index, sidecar_path, ArchiveIndex, EntryKey, IndexEntry, IndexMode, SKIPPABLE_MAGIC,
     SKIPPABLE_MAX_CONTENT,
 };
+pub use volume_letter as volume_of;
 
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -671,7 +672,7 @@ fn split_mtime(t: Option<SystemTime>) -> (u64, u32) {
 
 /// Volume letter of an absolute path, lowercased ("c"), if it has one.
 #[cfg(windows)]
-fn volume_letter(p: &Path) -> Option<String> {
+pub fn volume_letter(p: &Path) -> Option<String> {
     use std::path::Prefix;
     match p.components().next() {
         Some(std::path::Component::Prefix(pre)) => match pre.kind() {
@@ -683,7 +684,7 @@ fn volume_letter(p: &Path) -> Option<String> {
 }
 
 #[cfg(not(windows))]
-fn volume_letter(p: &Path) -> Option<String> {
+pub fn volume_letter(p: &Path) -> Option<String> {
     None
 }
 

@@ -19,10 +19,15 @@
 //!   content, mandatory since format v0.1.
 
 pub mod archive;
+pub mod coldness;
 pub mod dedupe;
+pub mod default_rules;
 pub mod fsinfo;
 pub mod magic;
+pub mod ntfs;
 pub mod predict;
+pub mod quarantine;
+pub mod rules;
 pub mod scan;
 
 /// Crate version as declared in `Cargo.toml`.

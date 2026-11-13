@@ -265,6 +265,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+### 调试钩子（仅 debug 构建）
+
+B13 崩溃恢复与 NTFS 批量中断的可复现证据依赖两个环境变量：
+`COLDSTORE_CRASH_AFTER`（归档序列完成 N 个文件后 `abort()`）和
+`COLDSTORE_COMPRESS_STOP_AFTER`（压缩批次完成 N 个文件后自行停止）。
+两者都以 `#[cfg(debug_assertions)]` 编译期 gate：**release 构建里这两个
+变量、读取它们的代码和 abort 路径都不存在**，`cargo build --release`
+产物不会响应它们。注入方式见
+`crates/coldstore-cli/tests/b13_crash_recovery.rs`（debug profile 集成测试）。
+
 ---
 
 ## 许可证

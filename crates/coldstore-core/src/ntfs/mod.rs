@@ -94,8 +94,7 @@ pub const SENSITIVE_EXTENSIONS: &[&str] = &[
     // databases
     "db", "sqlite", "sqlite3", "mdb", "accdb", "ldb", "ldf", "mdf", "ndf", "dbf", "edb",
     // VM disk images
-    "vhd", "vhdx", "vmdk", "vdi", "qcow", "qcow2", "vdi", "hds", "pvm",
-    // game / engine data
+    "vhd", "vhdx", "vmdk", "vdi", "qcow", "qcow2", "hds", "pvm", // game / engine data
     "pak", "wad", "big", "sav", "save", "dmp", "core", "dump", "gcf", "gdb", "vpk", "bsp",
 ];
 
@@ -584,13 +583,13 @@ fn compress_batch_inner(
     Ok(stats)
 }
 
-/// Debug-only interrupt injection.
-///
-/// Mirrors P2's `COLDSTORE_CRASH_AFTER` hook: after N completed files the
+/// Debug-only interrupt injection (P7 A8): after N completed files the
 /// batch asks *itself* to stop, so the interrupt-and-resume path is
 /// reproducible for the reviewer instead of depending on a human pressing
-/// Ctrl-C at the right second. Harmless unless the variable is set
-/// explicitly; disclosed in the delivery doc.
+/// Ctrl-C at the right second. Mirrors P2's crash-injection hook. The
+/// whole seam is `#[cfg(debug_assertions)]` — release binaries contain
+/// neither the env var name nor the read; disclosed in the delivery doc.
+#[cfg(debug_assertions)]
 fn stop_after_env() -> Option<u64> {
     static STOP_AFTER: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *STOP_AFTER.get_or_init(|| {
@@ -599,6 +598,12 @@ fn stop_after_env() -> Option<u64> {
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|n| *n > 0)
     })
+}
+
+/// Release counterpart: always `None` — the interrupt seam does not exist.
+#[cfg(not(debug_assertions))]
+fn stop_after_env() -> Option<u64> {
+    None
 }
 
 /// Per-file worker.

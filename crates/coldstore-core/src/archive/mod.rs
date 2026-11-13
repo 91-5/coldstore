@@ -204,9 +204,13 @@ pub fn archive(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .ok_or_else(|| anyhow!("容器路径缺少父目录: {}", container.display()))?;
-    if !parent.exists() {
-        bail!("容器父目录不存在: {}", parent.display());
-    }
+    // P7 / ADV-B25-W1: create the container's parent on demand, so a fresh
+    // %TEMP% fixture (or a first-ever run) no longer fails closed just
+    // because `.coldstore/archive/` is absent. Any IO error — permissions,
+    // invalid path, read-only volume — is still returned verbatim with
+    // context; fail-closed behaviour is preserved for *errors*, not absence.
+    fs::create_dir_all(parent)
+        .with_context(|| format!("创建容器父目录失败: {}", parent.display()))?;
 
     // Deterministic entry order.
     let mut ordered: Vec<&FileEntry> = files.iter().collect();
@@ -736,6 +740,39 @@ mod tests {
             shas.insert(p.display().to_string().replace('/', "\\"), sha_of(&data));
         }
         (root, shas)
+    }
+
+    /// P7 / ADV-B25-W1: a fresh %TEMP% fixture with no `archive/` directory
+    /// — `archive()` creates the missing container parent, lands the
+    /// container, and a single frame still retrieves with a matching SHA.
+    #[test]
+    fn archive_creates_missing_container_parent_and_roundtrips() -> Result<()> {
+        let root = temp_root("p7-missing-parent");
+        let data = payload(300_000, 7);
+        let src = root.join("only.log");
+        fs::write(&src, &data)?;
+        let want_sha = sha_of(&data);
+
+        let parent = root.join("archive").join("nested");
+        let container = parent.join("c.coldstore");
+        assert!(!parent.exists(), "fixture starts with no archive dir");
+
+        let scan_res = scan(&root, &ScanOptions::default())?;
+        assert_eq!(scan_res.files.len(), 1);
+        let stats = archive(&scan_res.files, &container, &ArchiveOptions::default())?;
+        assert_eq!(stats.frame_count, 1);
+        assert!(parent.is_dir(), "container parent auto-created");
+        assert!(container.is_file(), "container landed on disk");
+
+        let out_dir = temp_root("p7-missing-parent-out");
+        let dest = out_dir.join("only.log");
+        let outcome = retrieve(&container, &index::EntryKey::Ordinal(0), &dest)?;
+        assert!(outcome.sha_verified, "retrieval verifies the frame hash");
+        assert_eq!(sha_of(&fs::read(&dest)?), want_sha, "content intact");
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&out_dir).ok();
+        Ok(())
     }
 
     #[test]

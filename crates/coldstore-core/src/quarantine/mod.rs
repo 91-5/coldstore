@@ -148,8 +148,11 @@ fn new_batch_id() -> String {
 
 /// Debug-only crash injection (card B13 evidence): after `N` completed
 /// file units the process aborts mid-sequence, leaving a torn journal.
-/// Requires an explicit env var; harmless unless someone deliberately sets
-/// it. Disclosed to the reviewer in the delivery doc.
+/// P7 A1: the whole seam is gated by `#[cfg(debug_assertions)]` — in a
+/// release binary neither the env var name, nor the `env::var` call, nor
+/// the `abort()` path is compiled in. B13 integration tests run in the
+/// debug profile, so their env injection still works unchanged.
+#[cfg(debug_assertions)]
 fn crash_hook(units_done: usize) {
     if let Ok(n) = env::var("COLDSTORE_CRASH_AFTER") {
         if let Ok(n) = n.trim().parse::<usize>() {
@@ -162,6 +165,10 @@ fn crash_hook(units_done: usize) {
         }
     }
 }
+
+/// Release counterpart: an empty, inlined no-op — no debug seam at all.
+#[cfg(not(debug_assertions))]
+fn crash_hook(_units_done: usize) {}
 
 /// THE six-step sequence (steps 1–5; step 6 is `quarantine_delete`).
 /// Every mutation below is inside this function and journaled (ADV-N2).
@@ -611,6 +618,11 @@ fn retention_dates(created_millis: u64, retention_days: u64) -> (String, String,
 /// time zones. `offset` is the local offset in seconds (east positive, e.g.
 /// +28800 for UTC+8); it is added to the UTC epoch before the civil-day
 /// conversion.
+///
+/// DST (P7 A12): the local offset is evaluated at call time, so across a
+/// daylight-saving switch a historical batch's retention date may display
+/// one day off — display precision only; hard-constraint 3 (an expired
+/// batch is never silently deleted) still holds.
 fn retention_dates_offset(
     created_millis: u64,
     retention_days: u64,
